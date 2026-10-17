@@ -1,0 +1,25 @@
+# Локальное окружение Python и кеши инструментов.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Результаты измерения покрытия тестами и сборки проекта.
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Локальные настройки, секреты и журналы. Образец .env.example можно хранить.
+.env
+.env.*
+!.env.example
+*.log
+
+# Служебные файлы редакторов и macOS.
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,34 @@
+# Основные сведения о проекте и библиотеки, необходимые для запуска API.
+[project]
+name = "ai-support-agent"
+version = "0.1.0"
+description = "AI-powered technical support system: Stage 01, FastAPI foundation"
+readme = "README.md"
+# Ограничение проверяется при выборе Python для окружения проекта.
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",             # Маршруты API, JSON-ответы и документация /docs.
+    "uvicorn[standard]",   # ASGI-сервер и дополнения, включая автоперезапуск.
+]
+
+# Инструменты разработки: uv sync устанавливает группу dev по умолчанию.
+[dependency-groups]
+dev = [
+    "httpx",   # HTTP-клиент, который также использует наш TestClient.
+    "pytest",  # Находит и запускает автоматические тесты.
+    "ruff",    # Проверяет код и его форматирование.
+]
+
+# Pytest ищет тесты в tests/ и добавляет корень проекта в путь импортов.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# Ruff проверяет код с учётом синтаксиса Python 3.12.
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+# E — стиль, F — ошибки кода, I — порядок импортов, UP — современный Python.
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
