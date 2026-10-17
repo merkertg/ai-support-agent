@@ -1,0 +1,31 @@
+# Локальное окружение пересоздаётся внутри Linux-образа из uv.lock.
+.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Не отправляем Docker историю Git, настройки и секреты разработчика.
+.git/
+.github/
+.gitignore
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# В рабочем контейнере нужны только app/, pyproject.toml, uv.lock и README.md.
+# Тесты и инструкции проверяются в CI вне финального образа.
+tests/
+scripts/
+docs/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/

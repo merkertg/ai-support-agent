@@ -6,7 +6,7 @@
 
 A Python learning project for a technical support assistant. The future product will help an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery.
 
-The current implementation covers **Stage 01: a minimal FastAPI application**. It provides `GET /health`, interactive API documentation, and automated checks. The roadmap below describes later work.
+The current implementation covers **Stage 01: a minimal FastAPI application**, plus a GitHub Actions pipeline and Docker packaging. It provides `GET /health`, interactive API documentation, and automated checks. Successful pushes to `main` publish the tested container image to GHCR. The roadmap below describes later product work.
 
 ## Requirements
 
@@ -63,17 +63,58 @@ uv run ruff format --check .
 
 Stage 01 is ready when the server starts, `/docs` is available, and the automated health check passes. Run the commands above to verify your checkout.
 
+## CI and delivery to GHCR
+
+The pipeline runs for pushes to `main`, pull requests targeting `main`, and manual checks:
+
+```text
+Locked dependencies + Ruff + Pytest
+                  ↓
+Docker build + real HTTP smoke test
+                  ↓
+Publish the tested image to GHCR (push to main only)
+```
+
+The container is built once, checked through `/health`, `/docs`, and `/openapi.json`, and passed to the publication job as an artifact. A failed check blocks publication.
+
+Images use `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The current tip of `main` can also update `latest`. The workflow delivers an image to the registry; running it on an external server is a later step.
+
+**[Подробная инструкция CI/CD на русском](docs/CI_CD.md)** explains every stage, GitHub permissions, logs, artifacts, image tags, local reproduction, and troubleshooting. A local `git commit` starts no GitHub jobs until the commit is pushed.
+
+## Run with Docker
+
+```bash
+docker build -t ai-support-agent:local .
+docker run --rm --name ai-support-agent-local -p 127.0.0.1:8001:8000 ai-support-agent:local
+```
+
+Open `http://127.0.0.1:8001/docs`. From a second terminal in the project root, verify the running container:
+
+```bash
+.venv/bin/python scripts/smoke_test.py --base-url http://127.0.0.1:8001 --timeout 30
+```
+
+Stop the foreground container with `Ctrl+C`. On another machine, use Python 3.12+ or the synchronized project environment for the smoke command.
+
 ## Project files
 
 ```text
+.github/workflows/
+  ci.yml                 # Automated checks and publication to GHCR
 app/
   __init__.py
   main.py                # FastAPI application and health endpoint
 tests/
   test_health.py         # API checks
+  test_smoke_test.py      # Smoke CLI regression tests
+scripts/
+  smoke_test.py          # Real HTTP checks for a running container
 docs/
   APPROACH.md            # Current design and future architecture
+  CI_CD.md               # Detailed CI/CD guide in Russian
   STAGE_01.md            # First-stage learning guide in Russian
+Dockerfile               # Production image with a non-root runtime
+.dockerignore            # Excludes local environments, secrets, caches
 pyproject.toml           # Project metadata, dependencies, tool settings
 uv.lock                  # Resolved dependency versions
 README.md
@@ -92,12 +133,13 @@ README.md
 | 07 | LangGraph workflow and human review | Planned |
 | 08 | Streamlit operator interface | Planned |
 | 09 | Integration tests, agent evaluations, security checks | Planned |
-| 10 | Docker Compose, CI, and GitHub demonstration materials | Planned |
+| 10 | Packaging, CI/CD, and GitHub demonstration materials | CI and delivery to GHCR configured; Docker Compose and demonstration materials planned |
 
 ## Documentation
 
 - [Solution approach](docs/APPROACH.md)
 - [Stage 01 learning guide](docs/STAGE_01.md)
+- [CI/CD and Docker guide](docs/CI_CD.md)
 - [FastAPI: first steps](https://fastapi.tiangolo.com/tutorial/first-steps/)
 - [FastAPI: testing](https://fastapi.tiangolo.com/tutorial/testing/)
 

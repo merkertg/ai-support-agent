@@ -13,6 +13,7 @@ FastAPI также предоставляет описание API и интер
 Это фундамент будущей системы технической поддержки.
 Клиентов, лицензий, обращений, PostgreSQL, RAG и AI-агента в коде пока нет.
 Следующий этап добавит PostgreSQL, модели данных и миграции.
+Дополнительно настроены Docker и GitHub Actions; они подробно разобраны в [инструкции CI/CD](CI_CD.md).
 
 На первом этапе нужно понять цепочку:
 
@@ -67,10 +68,10 @@ ai-support-agent/
 ### Шаг 1. Открой Terminal и перейди в проект
 
 ```bash
-cd "/Users/arslanbakiev/Desktop/ИИ кузница/ai-support-agent"
+cd "/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent"
 ```
 
-Кавычки нужны из-за пробела в имени папки `ИИ кузница`.
+Кавычки нужны из-за пробела в имени папки `AI Forge`.
 Проверь текущую папку:
 
 ```bash
@@ -80,7 +81,7 @@ pwd
 Ожидаемый путь:
 
 ```text
-/Users/arslanbakiev/Desktop/ИИ кузница/ai-support-agent
+/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent
 ```
 
 ### Шаг 2. Проверь Python окружения
@@ -383,12 +384,12 @@ assert response.json() == {
 Открой второй Terminal и перейди в проект:
 
 ```bash
-cd "/Users/arslanbakiev/Desktop/ИИ кузница/ai-support-agent"
+cd "/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent"
 .venv/bin/python -m pytest
 ```
 
-В известном проверенном запуске итог содержит `1 passed, 1 warning`.
-`1 passed` означает, что один тест прошёл.
+Команда запускает весь набор тестов: исходный тест `/health` и добавленные проверки smoke CLI.
+В результате строка `N passed` означает, что успешно прошли N тестов.
 `1 warning` относится к предупреждению совместимости зависимостей Starlette и HTTPX.
 Предупреждение сообщает о поведении библиотеки и не означает провал теста.
 Его не нужно скрывать или менять зависимости только ради исчезновения строки.
@@ -458,7 +459,7 @@ cd "/Users/arslanbakiev/Desktop/ИИ кузница/ai-support-agent"
 3. Перейди в корень проекта и выполни команды ниже.
 
 ```bash
-cd "/Users/arslanbakiev/Desktop/ИИ кузница/ai-support-agent"
+cd "/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent"
 uv --version
 uv sync --locked
 ```
@@ -562,6 +563,10 @@ uv run ruff format --check .
 Почему тест сначала падает: сейчас он сравнивает весь ответ, а не только поле `status`.
 Изменение контракта API требует обновления и реализации, и ожидаемого результата.
 Это учебное изменение не внесено автоматически: выполняй его самостоятельно, когда будешь готов.
+
+После добавления CI контракт `/health` также проверяет smoke CLI. Если выполняешь это упражнение,
+обнови `EXPECTED_HEALTH` в `scripts/smoke_test.py` и корректный ответ `/health` в `valid_responses()`
+из `tests/test_smoke_test.py`. Так все проверки будут ожидать одну и ту же новую структуру ответа.
 
 Для завершения этапа проверь три результата: сервер запускается, `/docs` открывается,
 автоматический тест `/health` проходит. После упражнения также проверь Ruff командами из раздела 9.

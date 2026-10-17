@@ -23,3 +23,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# JUnit-отчёты локальных и автоматических запусков Pytest.
+reports/

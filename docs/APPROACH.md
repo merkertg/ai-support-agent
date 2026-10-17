@@ -66,11 +66,21 @@ Local verification on 2026-10-17 with Python 3.12.14:
 - `uv sync --locked --offline` confirmed the environment matches the lockfile.
 - A running Uvicorn server returned HTTP 200 for `/health`, `/docs`, and `/openapi.json`; the health response and documented operation were checked.
 
+## CI/CD and Docker packaging
+
+`.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. It installs locked dependencies, checks Ruff lint and formatting, and runs all Pytest tests. After those checks pass, the pipeline builds a production Docker image and checks its HTTP endpoints with `scripts/smoke_test.py`.
+
+The production image installs runtime dependencies only, runs as UID 10001, and exposes Uvicorn on port 8000. The smoke CLI also has regression tests against a real local HTTP server.
+
+On a successful push to `main`, the tested image is exported as an artifact, loaded and identified again in the publication job, and pushed to GHCR without rebuilding. Each commit receives a full SHA tag; only the current `main` tip updates `latest`. Publications queue sequentially. The workflow uses `GITHUB_TOKEN`, with `packages: write` limited to the publication job.
+
+This implements continuous delivery of a container image. An external server deployment is outside the chosen scope. Detailed operation and verification instructions are in [CI_CD.md](CI_CD.md). GitHub execution and publication must be confirmed from an actual workflow run, independently of local checks.
+
 ## Current limitations
 
 - `/health` returns a fixed application status. It does not check databases, external APIs, or infrastructure readiness.
 - Data is not stored between requests. There are no customer, license, or ticket operations yet.
-- The development server listens on the local loopback address. Authentication and deployment configuration are later work.
+- The development server listens on the local loopback address. Authentication and external server deployment are later work.
 - There is no AI reasoning, document retrieval, or message delivery at this stage.
 
 ## Next step
