@@ -1,0 +1,241 @@
+"""Схема поддержки: клиенты, лицензии, обращения и будущие записи агента.
+
+Эти классы описывают данные. Они не реализуют API, авторизацию, запуск LLM
+или поиск по базе знаний. Реальную схему PostgreSQL изменяет только Alembic.
+"""
+
+from datetime import datetime
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Identity,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+class User(Base):
+    """Профиль сотрудника поддержки без пароля и механизма авторизации."""
+
+    __tablename__ = "users"
+    __table_args__ = (CheckConstraint("role IN ('operator', 'admin')", name="role"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    role: Mapped[str] = mapped_column(String(20), server_default="operator")
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Customer(Base):
+    """Клиент, которому принадлежат лицензии и обращения в поддержку."""
+
+    __tablename__ = "customers"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    company: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Product(Base):
+    """Продукт с устойчивым уникальным кодом для лицензий и обращений."""
+
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    code: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class License(Base):
+    """Лицензия клиента на продукт с проверкой статуса и срока действия."""
+
+    __tablename__ = "licenses"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'expired', 'revoked')", name="status"),
+        CheckConstraint("expires_at IS NULL OR expires_at >= issued_at", name="dates"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    # RESTRICT сохраняет связь: нельзя удалить клиента/продукт с лицензиями.
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+    license_key: Mapped[str] = mapped_column(String(255), unique=True)
+    status: Mapped[str] = mapped_column(String(20), server_default="active")
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Ticket(Base):
+    """Обращение клиента по продукту с приоритетом и текущим статусом."""
+
+    __tablename__ = "tickets"
+    __table_args__ = (
+        CheckConstraint(
+            "priority IN ('low', 'medium', 'high', 'critical')", name="priority"
+        ),
+        CheckConstraint(
+            "status IN ('open', 'in_progress', 'waiting_customer', "
+            "'resolved', 'closed')",
+            name="status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+    subject: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(20), server_default="medium")
+    status: Mapped[str] = mapped_column(String(30), server_default="open")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # onupdate обновляет время при UPDATE через SQLAlchemy. Прямой SQL должен
+    # явно передавать updated_at: серверный триггер на этом этапе не создаётся.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TicketMessage(Base):
+    """Сообщение в обращении; сотрудник указан только для автора operator."""
+
+    __tablename__ = "ticket_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "author_type IN ('customer', 'operator', 'agent')", name="author_type"
+        ),
+        CheckConstraint(
+            "(author_type = 'operator' AND user_id IS NOT NULL) OR "
+            "(author_type IN ('customer', 'agent') AND user_id IS NULL)",
+            name="author_user",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    # Сообщения — часть обращения, поэтому удаляются вместе с ним.
+    ticket_id: Mapped[int] = mapped_column(
+        ForeignKey("tickets.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    author_type: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class KnowledgeDocument(Base):
+    """Метаданные будущей Markdown-статьи; текст и поиск появятся позднее."""
+
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    # Ключ для ссылок из ответов; путь указывает на исходный Markdown-файл.
+    document_key: Mapped[str] = mapped_column(String(64), unique=True)
+    title: Mapped[str] = mapped_column(String(300))
+    source_path: Mapped[str] = mapped_column(String(1024), unique=True)
+    # NULL означает общий документ. Удаление продукта сохраняет метаданные.
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), index=True
+    )
+    product_version: Mapped[str | None] = mapped_column(String(64))
+    checksum: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentRun(Base):
+    """Будущая запись запуска агента; сам агент на этапе 02 не запускается."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')", name="status"
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR finished_at >= started_at", name="dates"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(
+        ForeignKey("tickets.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), server_default="pending")
+    model: Mapped[str | None] = mapped_column(String(200))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentSuggestion(Base):
+    """Будущее предложение агента с решением и сотрудником-рецензентом."""
+
+    __tablename__ = "agent_suggestions"
+    __table_args__ = (
+        CheckConstraint("suggestion_type IN ('reply', 'action')", name="type"),
+        CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="status"),
+        CheckConstraint(
+            "(status = 'pending' AND reviewed_by IS NULL AND reviewed_at IS NULL) "
+            "OR (status IN ('approved', 'rejected') AND reviewed_by IS NOT NULL "
+            "AND reviewed_at IS NOT NULL)",
+            name="review",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    # Обращение определяется через agent_runs.ticket_id без дублирования FK.
+    agent_run_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    suggestion_type: Mapped[str] = mapped_column(String(20), server_default="reply")
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), server_default="pending")
+    # Ожидающее предложение не имеет рецензента; принятое/отклонённое имеет.
+    reviewed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

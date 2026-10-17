@@ -12,6 +12,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 # Ограничиваем объём ответа, чтобы ошибка сервиса не заполнила память CI.
 MAX_RESPONSE_BYTES = 1024 * 1024
 EXPECTED_HEALTH = {"status": "ok", "service": "ai-support-agent"}
+EXPECTED_READINESS = {"status": "ok", "database": "ok"}
 
 
 class SmokeTestError(Exception):
@@ -117,8 +118,8 @@ def json_object(body: bytes, endpoint: str) -> dict:
     return payload
 
 
-def run_checks(url: str, timeout: float) -> None:
-    """Дождаться запуска и проверить health, Swagger UI и OpenAPI за один срок."""
+def run_checks(url: str, timeout: float, check_database: bool = False) -> None:
+    """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -142,6 +143,16 @@ def run_checks(url: str, timeout: float) -> None:
         )
     print("OK /health: HTTP 200 и ожидаемый JSON")
 
+    if check_database:
+        # Compose уже дождался готовности. HTTP 503 здесь — ошибка контракта,
+        # а не повод повторять запрос до случайного успешного ответа.
+        readiness = json_object(fetch(f"{url}/ready", deadline), "/ready")
+        if readiness != EXPECTED_READINESS:
+            raise SmokeTestError(
+                f"/ready: ожидался {EXPECTED_READINESS!r}, получен {readiness!r}"
+            )
+        print("OK /ready: HTTP 200, соединение с БД и миграции готовы")
+
     docs = fetch(f"{url}/docs", deadline)
     if b"SwaggerUIBundle" not in docs:
         raise SmokeTestError("/docs: в ответе отсутствует SwaggerUIBundle")
@@ -157,7 +168,15 @@ def run_checks(url: str, timeout: float) -> None:
         health_path.get("get"), dict
     ):
         raise SmokeTestError("/openapi.json: отсутствует операция GET /health")
-    print("OK /openapi.json: HTTP 200, title и операция GET /health")
+    if check_database:
+        ready_path = paths.get("/ready")
+        if not isinstance(ready_path, dict) or not isinstance(
+            ready_path.get("get"), dict
+        ):
+            raise SmokeTestError("/openapi.json: отсутствует операция GET /ready")
+        print("OK /openapi.json: HTTP 200, title и операции GET /health, GET /ready")
+    else:
+        print("OK /openapi.json: HTTP 200, title и операция GET /health")
 
 
 def main() -> int:
@@ -175,9 +194,14 @@ def main() -> int:
         default=30.0,
         help="общий срок ожидания и проверок в секундах (по умолчанию 30)",
     )
+    parser.add_argument(
+        "--check-database",
+        action="store_true",
+        help="также проверить /ready и его описание в OpenAPI (этап 02)",
+    )
     args = parser.parse_args()
     try:
-        run_checks(args.base_url, args.timeout)
+        run_checks(args.base_url, args.timeout, check_database=args.check_database)
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)
         return 1

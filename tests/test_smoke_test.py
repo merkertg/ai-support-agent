@@ -16,9 +16,12 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
 
 
-def valid_responses() -> dict[str, tuple[int, bytes]]:
-    """Собрать минимальные корректные HTTP-ответы публичного контракта API."""
-    return {
+def valid_responses(check_database: bool = False) -> dict[str, tuple[int, bytes]]:
+    """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
+    paths = {"/health": {"get": {}}}
+    if check_database:
+        paths["/ready"] = {"get": {}}
+    responses = {
         "/health": (
             200,
             json.dumps({"status": "ok", "service": "ai-support-agent"}).encode(),
@@ -29,11 +32,14 @@ def valid_responses() -> dict[str, tuple[int, bytes]]:
             json.dumps(
                 {
                     "info": {"title": "AI Support Agent"},
-                    "paths": {"/health": {"get": {}}},
+                    "paths": paths,
                 }
             ).encode(),
         ),
     }
+    if check_database:
+        responses["/ready"] = (200, b'{"status": "ok", "database": "ok"}')
+    return responses
 
 
 @contextmanager
@@ -68,10 +74,15 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
         thread.join(timeout=2)
 
 
-def run_smoke(url: str, timeout: str = "2") -> subprocess.CompletedProcess:
+def run_smoke(
+    url: str, timeout: str = "2", check_database: bool = False
+) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
+    command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
+    if check_database:
+        command.append("--check-database")
     return subprocess.run(
-        [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -144,3 +155,56 @@ def test_cli_rejects_invalid_timeout(timeout: str) -> None:
     result = run_smoke("http://127.0.0.1:1", timeout=timeout)
     assert result.returncode == 2
     assert "тайм-аут" in result.stderr
+
+
+def test_cli_accepts_database_readiness() -> None:
+    """Флаг готовности проверяет четыре реальных маршрута и GET /ready в схеме."""
+    with http_server(valid_responses(check_database=True)) as (url, requests):
+        result = run_smoke(url, check_database=True)
+    assert result.returncode == 0, result.stderr
+    assert requests == Counter(
+        {"/health": 1, "/ready": 1, "/docs": 1, "/openapi.json": 1}
+    )
+    assert "OK /ready" in result.stdout
+    assert "GET /ready" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        ((503, b'{"status": "unavailable"}'), "HTTP 503"),
+        ((200, b"broken json"), "невалидный JSON"),
+        ((200, b"[]"), "JSON-объект"),
+        ((200, b'{"status": "ok"}'), "ожидался"),
+        ((200, b'{"status": "ok", "database": "unavailable"}'), "ожидался"),
+    ],
+)
+def test_cli_rejects_bad_database_readiness_without_retry(
+    response: tuple[int, bytes], message: str
+) -> None:
+    """HTTP 503 и неверные данные /ready немедленно блокируют выпуск образа."""
+    responses = valid_responses(check_database=True)
+    responses["/ready"] = response
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_database=True)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert requests == Counter({"/health": 1, "/ready": 1})
+
+
+@pytest.mark.parametrize("ready_path", [None, {}, {"post": {}}, {"get": []}])
+def test_cli_requires_readiness_operation_in_openapi(ready_path: object) -> None:
+    """Одного ответа /ready мало: OpenAPI должен содержать именно GET операцию."""
+    responses = valid_responses(check_database=True)
+    schema = json.loads(responses["/openapi.json"][1])
+    if ready_path is None:
+        schema["paths"].pop("/ready")
+    else:
+        schema["paths"]["/ready"] = ready_path
+    responses["/openapi.json"] = (200, json.dumps(schema).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_database=True)
+    assert result.returncode == 1
+    assert "GET /ready" in result.stderr
+    assert requests["/ready"] == 1
+    assert requests["/openapi.json"] == 1

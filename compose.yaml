@@ -1,0 +1,80 @@
+# Локальный стенд этапа 02. Настройки берутся из .env, образ — из Dockerfile.
+name: ai-support-agent
+
+# Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
+x-application: &application
+  image: ${APP_IMAGE:-ai-support-agent:local}
+  build:
+    context: .
+  environment:
+    DATABASE_URL: ${DATABASE_URL_DOCKER:?Скопируй .env.example в .env и укажи DATABASE_URL_DOCKER}
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-support}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Укажи POSTGRES_PASSWORD в .env}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_support}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # Обычный down не удаляет этот том: записи переживают пересоздание БД.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # TCP проверяется после инициализации, отдельно от временного init-сервера.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  migrate:
+    <<: *application
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    # Короткая команда миграции не является HTTP-сервером.
+    healthcheck:
+      disable: true
+
+  api:
+    <<: *application
+    ports:
+      - "127.0.0.1:${API_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # В Dockerfile /ready проверяет соединение с БД и актуальность миграции.
+    healthcheck:
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # Отдельная одноразовая БД для integration tests. Данные development не затрагиваются.
+  db-test:
+    profiles: [test]
+    image: postgres:17
+    environment:
+      POSTGRES_USER: support
+      POSTGRES_PASSWORD: support_ci
+      POSTGRES_DB: ai_support_test
+    ports:
+      - "127.0.0.1:${POSTGRES_TEST_PORT:-5434}:5432"
+    # Тестовые записи хранятся в памяти и не переживают остановку контейнера.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U support -d ai_support_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  postgres_data:

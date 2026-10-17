@@ -29,6 +29,24 @@ jobs:
     name: Python checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Это отдельная БД runner: интеграционные тесты вправе сбрасывать её схему.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: support_ci
+          POSTGRES_DB: ai_support_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U support -d ai_support_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql+psycopg://support:support_ci@127.0.0.1:5432/ai_support_test
+      TEST_DATABASE_URL: postgresql+psycopg://support:support_ci@127.0.0.1:5432/ai_support_test
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +68,16 @@ jobs:
       - name: Install locked dependencies
         id: dependencies
         run: uv sync --locked
+
+      # Проверяем реальный путь создания БД и совпадение схемы с моделями.
+      # Ошибка миграции блокирует container и дальнейшую публикацию образа.
+      - name: Apply database migrations
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked alembic upgrade head
+
+      - name: Check database schema drift
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked alembic check
 
       # Проверки независимы: ошибка lint не мешает увидеть результат тестов.
       # Общий результат job остаётся ошибкой, если упала любая проверка.
@@ -81,6 +109,16 @@ jobs:
     needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Compose получает явные настройки: файла .env в CI нет.
+    # Этот проект и его том изолированы от Python checks и локальной разработки.
+    env:
+      APP_IMAGE: ai-support-agent:ci
+      POSTGRES_USER: support
+      POSTGRES_PASSWORD: container_ci
+      POSTGRES_DB: ai_support
+      POSTGRES_PORT: "5433"
+      API_PORT: "8000"
+      DATABASE_URL_DOCKER: postgresql+psycopg://support:container_ci@db:5432/ai_support
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,16 +132,33 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag ai-support-agent:ci .
 
-      # Порт открыт только на runner; после проверки контейнер удаляется.
-      - name: Start container
+      # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
+      # --no-build гарантирует использование только что собранного образа.
+      - name: Start database, migrations and API
         run: |
-          docker run --detach --name ai-support-agent-ci \
-            --publish 127.0.0.1:8000:8000 ai-support-agent:ci
+          docker compose --project-name ai-support-ci up \
+            --detach --no-build --wait --wait-timeout 90 api
 
-      - name: Check HTTP endpoints
+      - name: Check HTTP endpoints and database readiness
         run: |
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-database
+
+      # Подтверждаем, что данные находятся в постоянном томе PostgreSQL.
+      # После пересоздания контейнеров только читаем: seed мог бы скрыть потерю.
+      - name: Verify persistence after container recreation
+        run: |
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.db.demo seed > before.json
+          # down без --volumes сохраняет named volume, но удаляет контейнеры.
+          docker compose --project-name ai-support-ci down
+          docker compose --project-name ai-support-ci up \
+            --detach --no-build --wait --wait-timeout 90 api
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.db.demo show > after.json
+          cmp before.json after.json
+          python3 scripts/smoke_test.py \
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-database
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image
@@ -124,14 +179,17 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-      - name: Show container logs on failure
+      - name: Show Compose logs on failure
         if: failure()
-        run: docker logs ai-support-agent-ci || true
+        run: docker compose --project-name ai-support-ci logs --no-color || true
 
+      # Удаляются только контейнеры и том изолированного проекта этого runner.
       # always() обеспечивает уборку при успехе, ошибке или отмене workflow.
-      - name: Remove test container
+      - name: Remove test Compose project
         if: always()
-        run: docker rm --force ai-support-agent-ci || true
+        run: |
+          docker compose --project-name ai-support-ci down \
+            --volumes --remove-orphans
 
   # Этап 3. GHCR только после успеха CI и только push в main.
   # Ручной запуск и pull request проверяют проект без публикации.

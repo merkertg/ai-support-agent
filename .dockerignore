@@ -18,7 +18,7 @@
 .vscode/
 *.log
 
-# В рабочем контейнере нужны только app/, pyproject.toml, uv.lock и README.md.
+# В runtime нужны app/, migrations/ и alembic.ini; локальные Compose-настройки не нужны.
 # Тесты и инструкции проверяются в CI вне финального образа.
 tests/
 scripts/
@@ -29,3 +29,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# Локальный Compose-стенд и отчёты не нужны при сборке образа.
+compose.yaml
+reports/
