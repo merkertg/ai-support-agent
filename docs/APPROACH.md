@@ -139,7 +139,7 @@ The Qdrant named volume retains the index across `docker compose down`, like the
 
 The PostgreSQL named volume retains development records after normal `docker compose down` and later startup. On the host, the default database port is `5433`, and the Compose API is available on `8001`. Services inside Docker use `db:5432`; host Python uses `127.0.0.1:5433`. These separate URLs are shown in `.env.example`.
 
-For development with automatic reload, only PostgreSQL needs to run in Docker. Apply migrations using host Python, then run Uvicorn on `127.0.0.1:8000`. The [README](../README.md) gives both startup paths.
+For development with automatic reload, only PostgreSQL needs to run in Docker. Apply migrations using host Python, then run Uvicorn on `127.0.0.1:8000`. The [quickstart instructions](instructions/quickstart.md) give both startup paths.
 
 `python -m app.db.demo seed` explicitly adds fictional customer, product, and license records in one transaction. Repeated calls reuse their unique keys and preserve existing values. `show` reads a stable JSON snapshot from a new session without writing. Comparing snapshots across `docker compose down` without `--volumes`, followed by `up`, demonstrates that records survive container removal and recreation in the named volume. The second snapshot comes from `show`; no second seed recreates missing records.
 
@@ -151,7 +151,7 @@ The integration fixtures reset their schema between scenarios. They require an e
 
 Compose provides a separate `db-test` service behind its `test` profile, on host port `5434` by default. It stores disposable test data in memory rather than the development volume. The [Stage 02 guide](STAGE_02.md) explains how to start it and run all tests.
 
-Run lint, formatting, and the full test suite using the commands in the [README](../README.md). Successful verification must also include actual startup, a successful `/ready`, and reading saved records after removing and recreating the Compose containers while retaining the database volume. The [development log](DEVELOPMENT_LOG.md) records implementation steps and verification evidence. This design document makes no claims about agent quality, retrieval accuracy, latency, or cost; those require future functionality and evaluation scenarios.
+Run lint, formatting, and the full test suite using the commands in the [testing instructions](instructions/testing.md). Successful verification must also include actual startup, a successful `/ready`, and reading saved records after removing and recreating the Compose containers while retaining the database volume. The [development log](DEVELOPMENT_LOG.md) records implementation steps and verification evidence. This design document makes no claims about agent quality, retrieval accuracy, latency, or cost; those require future functionality and evaluation scenarios.
 
 ## CI/CD and Docker packaging
 
