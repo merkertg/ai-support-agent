@@ -19,7 +19,7 @@ Start by creating a customer and product. Use the returned IDs to create their l
 
 Creation returns HTTP 201; reads return 200. Invalid input returns 422, an unknown record or missing creation reference returns 404, a duplicate unique value returns 409, and an unavailable database returns a safe 503. Lists return JSON arrays ordered by ID, with `offset=0` and `limit=20` by default (maximum 100). License lists support `customer_id`, `product_id`, and `license_key`; ticket lists support `customer_id`, `product_id`, and `status`. Filters without matches return an empty array.
 
-New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. The resource API provides create/read operations. The agent and human-review workflow below implement analysis and controlled delivery; general editing, deletion, and authentication remain future work.
+New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. The resource API provides create/read operations. The agent and human-review workflow below implement analysis and controlled delivery; only the ticket status can be changed (`PATCH /api/tickets/{resource_id}`); general editing, deletion, and authentication remain future work.
 
 ## Preview a reply with the LLM client
 
@@ -27,6 +27,12 @@ The default `LLM_PROVIDER=mock` requires no API key and makes no external reques
 
 ```bash
 curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/llm/status
+```
+
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8001/api/llm/status
 ```
 
 The response is `{"provider":"mock","model":"mock-draft-v1","configured":true}`. In Swagger, open `POST /api/tickets/{resource_id}/draft`, enter an existing ticket ID, and execute it without a request body. The response includes `summary`, `category`, `draft_reply`, provider/model metadata, and `requires_human_review: true`. Mock replies explicitly state that no real model was called. This preview does not save a draft or change the ticket.
@@ -37,12 +43,25 @@ To enable OpenAI, set `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, and an explicit `
 docker compose up --detach --no-build --force-recreate --wait api
 ```
 
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+docker compose up --detach --no-build --force-recreate --wait api
+```
+
 `configured: true` only confirms that the required settings exist. The [Stage 04 guide](../STAGE_04.md) explains real-provider setup, structured output, timeouts, token usage, safe errors, and the first manual request. No real OpenAI request has been verified in this iteration because no API key is configured. Automated tests use mock responses and the real SDK with a substituted HTTP transport.
 
 For a complete container smoke test in mock mode only:
 
 ```bash
 uv run --locked python scripts/smoke_test.py \
+  --base-url http://127.0.0.1:8001 --timeout 30 --check-llm
+```
+
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+uv run --locked python scripts/smoke_test.py `
   --base-url http://127.0.0.1:8001 --timeout 30 --check-llm
 ```
 
@@ -57,6 +76,20 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/knowledge/
 curl --silent --show-error --fail-with-body --request POST \
   http://127.0.0.1:8001/api/knowledge/search --header 'Content-Type: application/json' \
   --data '{"query":"Сервер не запускается после обновления","product_code":"techflow-server","limit":3}'
+```
+
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8001/api/knowledge/status
+$body = @{
+  query = 'Сервер не запускается после обновления'
+  product_code = 'techflow-server'
+  limit = 3
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8001/api/knowledge/search `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 ```
 
 The status shows the embedding provider, collection state (`ready`, `missing`, `incompatible`, `unavailable`, or `not_configured`), Qdrant points, and registered articles. Search returns chunks with `document_key`, `title`, `section`, `text`, cosine `score`, `source_path`, and `scope`. With `product_code`, results are limited to that product's articles plus general articles.
@@ -78,6 +111,13 @@ uv run --locked python scripts/smoke_test.py \
   --base-url http://127.0.0.1:8001 --timeout 60 --check-agent
 ```
 
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+uv run --locked python scripts/smoke_test.py `
+  --base-url http://127.0.0.1:8001 --timeout 60 --check-agent
+```
+
 `--check-agent` includes `--check-llm` and the read-only `--check-knowledge` (which requires an indexed knowledge base) and additionally creates a fictional license, an agent run, and a suggestion that must cite a found article. The [Stage 06 guide](../STAGE_06.md) covers the knowledge base; the [Stage 05 guide](../STAGE_05.md) walks through each request, the saved trace, error handling, migration `0002_agent_runtime`, and the OpenAI adapter, which is tested only with a substituted HTTP transport.
 
 ## Review suggestions (human in the loop)
@@ -95,10 +135,34 @@ curl --silent --show-error --fail-with-body --request POST \
   --data '{"decision":"approve","reviewer_id":1,"final_content":"Hello! Please check port 8443."}'
 ```
 
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+$json = 'application/json; charset=utf-8'
+$user = @{ name = 'Operator'; email = 'operator@example.com' } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8001/api/users `
+  -ContentType $json -Body ([System.Text.Encoding]::UTF8.GetBytes($user))
+Invoke-RestMethod 'http://127.0.0.1:8001/api/suggestions?status=pending'
+$review = @{
+  decision = 'approve'
+  reviewer_id = 1
+  final_content = 'Hello! Please check port 8443.'
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8001/api/suggestions/1/review `
+  -ContentType $json -Body ([System.Text.Encoding]::UTF8.GetBytes($review))
+```
+
 `approve` may replace the text with `final_content`; it creates a ticket message from the employee (simulated delivery, no email is sent) and moves the ticket to `waiting_customer`. `reject` requires a `comment` and changes nothing in the ticket. A suggestion is decided once: a second decision returns 409. A `resolved` or `closed` ticket receives no reply: approval returns 409 before the workflow resumes, and the suggestion can only be rejected. Invalid or inactive reviewers are rejected before the workflow resumes, so it keeps waiting. `reviewer_id` is not authentication. Suggestions created before Stage 07 have no workflow and are decided directly.
 
 ```bash
 uv run --locked python scripts/smoke_test.py \
+  --base-url http://127.0.0.1:8001 --timeout 60 --check-review
+```
+
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+uv run --locked python scripts/smoke_test.py `
   --base-url http://127.0.0.1:8001 --timeout 60 --check-review
 ```
 
@@ -117,6 +181,12 @@ Stage 08 added read models for the operator interface; any HTTP client can use t
 
 ```bash
 curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/dashboard
+```
+
+In PowerShell on Windows ([equivalents](windows.md)):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8001/api/dashboard
 ```
 
 To prepare a reproducible demonstration through these APIs, run `scripts/demo_scenario.py`; see the [Stage 10 guide](../STAGE_10.md).

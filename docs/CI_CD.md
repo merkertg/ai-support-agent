@@ -133,7 +133,7 @@ Qdrant 1.19.1, а `TEST_QDRANT_URL` указывает на него. В обр�
 ```bash
 uv sync --locked
 uv run --locked python scripts/check_dependency_age.py --min-age-days 14
-uv run --locked python scripts/check_project.py
+uv run --locked python scripts/check_project.py --require-powershell
 uv run --locked alembic upgrade head
 uv run --locked alembic check
 uv run --locked ruff check .
@@ -152,8 +152,10 @@ uv run --locked python -m evaluations.run --output reports/evaluations.json
   из самого lock-файла. Свежий выпуск блокирует доставку, пока ему не исполнится
   две недели или пока lock не вернут на более раннюю версию.
 - `scripts/check_project.py` проверяет локальные ссылки Markdown, синтаксис
-  примеров Bash/JSON и наличие docstrings у функций и классов. Ошибка инструкции
-  блокирует доставку так же, как ошибка Python-кода.
+  примеров Bash, PowerShell и JSON и наличие docstrings у функций и классов.
+  PowerShell-примеры разбирает установленный на runner `pwsh`, ничего не выполняя;
+  флаг `--require-powershell` превращает непроверенные блоки в ошибку. Ошибка
+  инструкции блокирует доставку так же, как ошибка Python-кода.
 - `actionlint` 1.7.12 проверяет YAML и выражения GitHub Actions. Workflow
   скачивает официальный Linux-бинарник и перед запуском сверяет SHA256,
   записанный прямо в workflow. Исключена только диагностика нового `queue: max`;
@@ -610,7 +612,6 @@ runtime позволяет перенести созданное окружен�
 Перед коммитом проверь список изменений: `git status` и `git diff`.
 
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 git status
 git diff
 ```
@@ -644,11 +645,13 @@ git branch --show-current
 | `delivery` | `Validate delivery target` |
 | `checks` | `Python checks` |
 | `security` | `Audit runtime dependencies` |
+| `portability` | `Python on ubuntu-24.04`, `Python on macos-15`, `Python on windows-2025` |
 | `container` | `Build and smoke test Docker` |
 | `publish` | `Publish tested image to GHCR` |
 
 Для успешного push в `main` или выбранного `vX.Y.Z` должны завершиться
-все пять заданий. В историческом подтверждённом запуске `061c2a7` их было четыре.
+все шесть заданий; `portability` — это три запуска, по одному на ОС.
+В историческом подтверждённом запуске `061c2a7` заданий было четыре.
 Для PR и ручного запуска `publish` имеет ожидаемый статус `Skipped`.
 
 Открой задание и раскрой шаг с командой. В его логе видны сообщения Ruff,

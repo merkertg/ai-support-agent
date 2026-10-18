@@ -1,15 +1,19 @@
 """Проверить комментарии Python и исполнимый синтаксис примеров документации.
 
 Скрипт использует только стандартную библиотеку. Bash-примеры передаются
-в `bash -n`: команды из инструкций никогда не выполняются этой проверкой.
+в `bash -n`, PowerShell-примеры — парсеру `pwsh`: команды из инструкций никогда
+не выполняются этой проверкой. Без `pwsh` PowerShell-блоки только подсчитываются
+как непроверенные (powershell_unchecked); в CI на Linux и Windows `pwsh` есть.
 """
 
+import argparse
 import ast
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -19,6 +23,7 @@ FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 # Полный путь из PATH: в Windows CreateProcess иначе может выбрать заглушку WSL
 # из System32 раньше bash из Git for Windows.
 BASH = shutil.which("bash")
+PWSH = shutil.which("pwsh")
 LINK = re.compile(r"!?\[[^\]\n]*\]\((<[^>]+>|[^\s)]+)(?:\s+\"[^\"]*\")?\)")
 
 
@@ -49,6 +54,30 @@ def check_link(path: Path, target: str, root: Path) -> str | None:
     return None
 
 
+def check_powershell(body: str) -> str | None:
+    """Разобрать PowerShell без выполнения: только синтаксическое дерево скрипта."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+        script = Path(folder) / "example.ps1"
+        # BOM нужен Windows PowerShell; pwsh читает UTF-8 и без него.
+        script.write_text(body, encoding="utf-8-sig")
+        path = str(script).replace("'", "''")
+        command = (
+            "$errors = $null; "
+            "[void][System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{path}', [ref]$null, [ref]$errors); "
+            "if ($errors) { $errors | ForEach-Object { $_.Message }; exit 1 }"
+        )
+        result = subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            check=False,
+        )
+    if result.returncode:
+        message = result.stdout.decode("utf-8", errors="replace").strip()
+        return f"неверный PowerShell: {message}"
+    return None
+
+
 def check_example(language: str, body: str) -> str | None:
     """Проверить Bash без исполнения и JSON без допуска синтаксических ошибок."""
     if language in {"bash", "sh", "shell"}:
@@ -62,6 +91,8 @@ def check_example(language: str, body: str) -> str | None:
         if result.returncode:
             stderr = result.stderr.decode("utf-8", errors="replace").strip()
             return f"неверный Bash: {stderr}"
+    elif language == "powershell" and PWSH is not None:
+        return check_powershell(body)
     elif language == "json":
         try:
             json.loads(body)
@@ -92,6 +123,8 @@ def check_markdown(path: Path, root: Path) -> tuple[list[str], Counter]:
                 if problem:
                     errors.append(f"{path}:{start}: {problem}")
                 counts[f"{language or 'text'}_blocks"] += 1
+                if language == "powershell" and PWSH is None:
+                    counts["powershell_unchecked"] += 1
                 opening, body = None, []
             else:
                 body.append(line)
@@ -148,15 +181,24 @@ def use_utf8_output() -> None:
             stream.reconfigure(encoding="utf-8")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Показать все замечания сразу и вернуть код ошибки для GitHub Actions."""
     use_utf8_output()
+    parser = argparse.ArgumentParser(description=__doc__)
+    # В CI на Linux pwsh есть: отсутствие означает, что примеры не проверены.
+    parser.add_argument("--require-powershell", action="store_true")
+    arguments = parser.parse_args(argv)
     errors, counts = inspect_project(PROJECT_ROOT)
+    if arguments.require_powershell and counts["powershell_unchecked"]:
+        errors.append(
+            f"pwsh не найден: {counts['powershell_unchecked']} PowerShell-примеров "
+            "не проверены"
+        )
     print(json.dumps(dict(sorted(counts.items())), ensure_ascii=False))
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("Комментарии, локальные ссылки и примеры Bash/JSON проверены.")
+    print("Комментарии, локальные ссылки и примеры Bash/PowerShell/JSON проверены.")
     return 0
 
 

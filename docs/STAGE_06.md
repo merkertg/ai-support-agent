@@ -16,6 +16,10 @@
 [агент с инструментами](STAGE_05.md), [CI/CD и GHCR](CI_CD.md).
 Фактические результаты проверок — в [журнале разработки](DEVELOPMENT_LOG.md).
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Что появилось и как это проверить
 
 | Операция | Результат |
@@ -162,10 +166,9 @@ Qdrant в Compose запускается с `QDRANT__TELEMETRY_DISABLED=true`: �
 ## 6. Подготовить окружение
 
 Открой терминал в корне проекта и установи зависимости из `uv.lock`
-(добавился `qdrant-client` 1.19.1):
+(добавился `qdrant-client` 1.19.1). Команда выполняется из корня проекта:
 
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 uv sync --locked
 ```
 

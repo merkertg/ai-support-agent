@@ -8,6 +8,10 @@
 записываются в [журнале разработки](DEVELOPMENT_LOG.md). Команда в инструкции описывает способ проверки;
 успешный результат нужно подтвердить её выполнением.
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Что должно получиться
 
 После этапа 02 приложение получает PostgreSQL 17, постоянное хранилище, описание девяти таблиц через SQLAlchemy
@@ -63,11 +67,8 @@ HTTP-клиент → FastAPI
 
 Все команды ниже выполняются из корня проекта — папки, в которой находятся `pyproject.toml` и `compose.yaml`.
 
-```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
-```
-
-На другом компьютере подставь путь к своей копии репозитория.
+Открой в ней терминал. На Linux и macOS это Terminal, на Windows — Git Bash или WSL;
+аналоги команд для PowerShell собраны в [Windows и PowerShell](instructions/windows.md).
 
 Понадобятся:
 

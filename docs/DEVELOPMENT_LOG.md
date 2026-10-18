@@ -719,3 +719,19 @@ PDF обновлён: 25 страниц, 24 раздела. Все страни�
 под не-UTF-8 локалью 823 passed; actionlint без ошибок. GitHub Actions для
 нового коммита, включая macOS и Windows, ещё не запускался.
 
+
+## 2026-10-18 — инструкции для Windows и актуализация документации
+
+1. `docs/instructions/windows.md`: PowerShell 7, Git Bash, WSL; таблица аналогов
+   Bash-конструкций; типовые сценарии и запросы к API с UTF-8.
+2. PowerShell-блоки в DEMO, STAGE_08, STAGE_10 и usage (19); пометки в
+   STAGE_01–07 и STAGE_09; STAGE_01 без привязки к конкретному Mac.
+3. Путь `/Users/…/AI Forge/ai-support-agent` удалён из инструкций.
+4. Проверка синтаксиса PowerShell в `check_project.py`, флаг
+   `--require-powershell` в CI, 3 теста. Все 26 блоков разобраны pwsh 7.4.2.
+5. Аудит актуальности: число заданий CI, публикация UI, PATCH статуса,
+   структура проекта, README; PDF дополнен Windows и проверкой запуска.
+
+Результаты: 958 passed / 0 skipped на macOS; Ruff и проверка документации без
+ошибок; PDF 25 страниц. GitHub Actions для этих изменений не запускался.
+

@@ -59,10 +59,18 @@ FastAPI
 заменяй: он может содержать настройки уже созданного стенда.
 
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 if [ ! -f .env ]; then
   cp .env.example .env
 fi
+docker compose up --build --detach --wait --wait-timeout 180 ui
+docker compose exec -T api python -m app.knowledge.ingest
+docker compose ps --all
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up --build --detach --wait --wait-timeout 180 ui
 docker compose exec -T api python -m app.knowledge.ingest
 docker compose ps --all
@@ -100,6 +108,16 @@ API_URL=http://127.0.0.1:8001 uv run --locked --group ui streamlit run \
   operator_ui/main.py --server.address 127.0.0.1 --server.port 8501
 ```
 
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+uv sync --locked --group ui
+$env:API_URL = 'http://127.0.0.1:8001'
+uv run --locked --group ui streamlit run `
+  operator_ui/main.py --server.address 127.0.0.1 --server.port 8501
+Remove-Item Env:API_URL
+```
+
 Открой [UI, запущенный в Python](http://127.0.0.1:8501).
 Внутри Docker UI обращается к `http://api:8000`; на компьютере нужен
 опубликованный адрес `http://127.0.0.1:8001`. `localhost` внутри контейнера
@@ -117,6 +135,12 @@ API_URL=http://127.0.0.1:8001 uv run --locked --group ui streamlit run \
 ### 5.1. Подготовить данные
 
 ```bash
+uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
 uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
 ```
 
@@ -226,6 +250,12 @@ Streamlit `AppTest` проверяет отображение и действи�
 делает один ожидаемый запрос.
 
 ```bash
+uv run --locked --group ui pytest tests/test_operator_ui.py -q
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
 uv run --locked --group ui pytest tests/test_operator_ui.py -q
 ```
 

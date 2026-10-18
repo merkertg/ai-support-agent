@@ -9,6 +9,10 @@ PostgreSQL и возвращает результат с присвоенным 
 [журнале разработки](DEVELOPMENT_LOG.md). Устройство базы, миграций и томов подробно разобрано в
 [этапе 02](STAGE_02.md), а весь pipeline — в [инструкции CI/CD](CI_CD.md).
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Какой результат получаем
 
 Работают четыре ресурса:
@@ -89,12 +93,7 @@ Pydantic response schema → JSON + HTTP-статус
 
 Открой терминал в корне проекта:
 
-```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
-```
-
-На другом компьютере замени путь на свою папку репозитория. В ней должны находиться `pyproject.toml`,
-`compose.yaml` и `Dockerfile`.
+В этой папке находятся `pyproject.toml`, `compose.yaml` и `Dockerfile`.
 
 Сначала проверь, что `uv` доступен в текущем терминале через `PATH`:
 

@@ -40,7 +40,7 @@ uv run --locked alembic current
 uv run --locked alembic check
 ```
 
-`python scripts/check_project.py` checks every Python function/class docstring, local Markdown links, fenced code blocks, Bash syntax (`bash -n`, without executing examples), and JSON examples. [The verification report](../VERIFICATION.md) records the latest complete run and its limits.
+`python scripts/check_project.py` checks every Python function/class docstring, local Markdown links, fenced code blocks, Bash syntax (`bash -n`, without executing examples), PowerShell syntax (the `pwsh` parser, also without execution), and JSON examples. Without PowerShell 7 installed, PowerShell blocks are reported as `powershell_unchecked`; CI on Linux runs `check_project.py --require-powershell`, which turns unchecked blocks into an error. [The verification report](../VERIFICATION.md) records the latest complete run and its limits.
 
 ## Coverage gate
 

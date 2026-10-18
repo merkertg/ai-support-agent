@@ -15,6 +15,10 @@
 [автоматические проверки и GHCR](CI_CD.md).
 Фактические результаты каждого шага — в [журнале разработки](DEVELOPMENT_LOG.md).
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Что появилось и как это проверить
 
 | Операция | Результат |
@@ -205,12 +209,11 @@ SDK, чтобы один шаг не превратился в незаметн�
 Открой терминал в корне проекта:
 
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 uv sync --locked
 ```
 
-На другом компьютере замени только путь. Нужны Python 3.12+, `uv`, Docker
-и Docker Compose. Синхронизация устанавливает версии из `uv.lock`.
+Нужны Python 3.12+, `uv`, Docker и Docker Compose. Синхронизация устанавливает
+версии из `uv.lock`.
 
 Создай настройки только при отсутствии `.env`:
 

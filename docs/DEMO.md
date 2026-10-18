@@ -16,6 +16,15 @@ docker compose exec -T api python -m app.knowledge.ingest
 uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
 ```
 
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+uv sync --locked --group ui
+docker compose up --build --detach --wait --wait-timeout 180 ui
+docker compose exec -T api python -m app.knowledge.ingest
+uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
+```
+
 Если `.env` ещё нет, сначала создай его по [быстрому запуску](instructions/quickstart.md).
 Оставь `LLM_PROVIDER=mock` и `EMBEDDING_PROVIDER=mock`.
 Сохрани выведенные `operator_id`, `customer_id`, `product_id`, `ticket_id`,
@@ -84,6 +93,13 @@ uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
 
 ```bash
 uv run --locked python scripts/demo_scenario.py \
+  --url http://127.0.0.1:8001 --verify-review
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+uv run --locked python scripts/demo_scenario.py `
   --url http://127.0.0.1:8001 --verify-review
 ```
 

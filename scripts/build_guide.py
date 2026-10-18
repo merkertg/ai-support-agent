@@ -2290,7 +2290,8 @@ def build_story(verification):
         story,
         "9",
         "Как запустить у себя",
-        "Нужны Python 3.12+, uv 0.12.23 и Docker Desktop. Команды - из корня проекта.",
+        "Python 3.12+, uv 0.12.23 и Docker. Linux, macOS и Windows - "
+        "команды из корня проекта.",
         TEAL,
     )
     for number, title, command, note in [
@@ -2380,6 +2381,16 @@ def build_story(verification):
                 ],
             ],
             [190, W - 190],
+        ),
+        Spacer(1, 8),
+        callout(
+            "<b>Windows:</b> PowerShell 7, Git Bash или WSL 2; аналоги команд - "
+            '<font name="Mono">docs/instructions/windows.md</font>. Проверить '
+            "запуск без Docker на любой ОС: "
+            '<font name="Mono">uv run --locked python '
+            "scripts/check_local_start.py</font>.",
+            VIOLET,
+            VIOLET_L,
         ),
         Spacer(1, 8),
         callout(
@@ -2698,7 +2709,8 @@ def build_story(verification):
                 [
                     p("docs/instructions/", CELL_M),
                     p(
-                        "Быстрый запуск, работа с API, тесты, CI, структура проекта",
+                        "Быстрый запуск, Windows и PowerShell, работа с API, тесты, "
+                        "CI, структура проекта",
                         CELL,
                     ),
                 ],
@@ -3046,7 +3058,10 @@ def append_audit_pages(story, verification):
             "unset TEST_DATABASE_URL TEST_QDRANT_URL"
         ),
         Spacer(1, 8),
-        p("4. Проверить собранный стенд через HTTP", H2),
+        p("4. Проверить запуск API и UI на этом компьютере", H2),
+        code_block("uv run --locked python scripts/check_local_start.py"),
+        Spacer(1, 8),
+        p("5. Проверить собранный стенд через HTTP", H2),
         code_block(
             "docker compose up --build --detach --wait --wait-timeout 180 ui\n"
             "docker compose exec -T api python -m app.knowledge.ingest\n"
@@ -3310,6 +3325,16 @@ def append_audit_pages(story, verification):
                     "HTTP 502 / 504",
                     "run_id, safe error, лимиты",
                     "Изучить failed run, исправить причину",
+                ),
+                (
+                    "Windows: кракозябры, cp1252",
+                    "Кодировка консоли PowerShell",
+                    "[Console]::OutputEncoding = UTF8; PowerShell 7",
+                ),
+                (
+                    "Windows: $'\\r' в bash",
+                    "CRLF в старой копии репозитория",
+                    "git rm --cached -r . и git reset --hard",
                 ),
                 (
                     "Тесты skipped локально",

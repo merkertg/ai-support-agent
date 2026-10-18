@@ -92,7 +92,8 @@ docstrings, ссылки и примеры документации; текст 
 Руководство отражает текущую конфигурацию, а проверенные результаты
 по-прежнему берёт из `verification.json` после реального прогона:
 
-- Пять заданий CI: `delivery → checks/security → container → publish`.
+- Шесть заданий CI: `delivery → checks/security/portability → container → publish`;
+  `portability` проверяет Linux, macOS и Windows, `container` — также arm64.
   Оба проверенных образа API/UI передаются одним артефактом и проверяются
   по image ID; повторной сборки перед GHCR нет.
 - `main` публикует `sha-<полный SHA>`; `latest` меняется для актуальной вершины.

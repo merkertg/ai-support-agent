@@ -14,6 +14,10 @@
 [CI/CD](CI_CD.md). Фактические результаты проверок —
 в [журнале разработки](DEVELOPMENT_LOG.md).
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Что появилось и как это проверить
 
 | Операция | Результат |
@@ -166,8 +170,9 @@ Checkpointer подключается к той же БД через пул psyc
 
 ## 8. Подготовить окружение
 
+Команды выполняются из корня проекта — папки с `pyproject.toml` и `compose.yaml`.
+
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 uv sync --locked
 docker compose up --build --detach --wait --wait-timeout 120 api
 docker compose exec -T api python -m alembic current

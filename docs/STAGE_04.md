@@ -10,6 +10,10 @@
 [этапе 02](STAGE_02.md), HTTP API ресурсов — в [этапе 03](STAGE_03.md),
 проверки и доставка Docker-образа — в [инструкции CI/CD](CI_CD.md).
 
+> **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
+> В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
+> из страницы [Windows и PowerShell](instructions/windows.md).
+
 ## 1. Что должно работать после этапа
 
 Добавлены две HTTP-операции:
@@ -168,12 +172,8 @@ Compose достаточно `docker compose config --quiet`.
 
 Открой терминал в корне проекта:
 
-```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
-```
-
-На другом компьютере замени путь на свою папку. Для последующих команд нужны
-Python 3.12+, установленный `uv` и работающий Docker Desktop.
+Для последующих команд нужны Python 3.12+, установленный `uv` и работающий
+Docker (Docker Desktop на macOS и Windows).
 
 Установи зафиксированные зависимости:
 

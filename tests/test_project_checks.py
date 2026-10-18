@@ -69,3 +69,47 @@ def test_fences_links_and_bash_are_checked_without_execution(tmp_path):
     assert counts["markdown_blocks"] == 1
     assert counts["links"] == 3
     assert not marker.exists()
+
+
+def test_powershell_is_counted_as_unchecked_without_pwsh(tmp_path, monkeypatch):
+    """Без pwsh пример не выдаётся за проверенный: он попадает в отдельный счётчик."""
+    monkeypatch.setattr(checks, "PWSH", None)
+    path = tmp_path / "guide.md"
+    path.write_text("```powershell\nif (\n```\n", encoding="utf-8")
+    errors, counts = checks.check_markdown(path, tmp_path)
+    assert errors == []
+    assert counts["powershell_blocks"] == counts["powershell_unchecked"] == 1
+
+
+def test_powershell_parse_error_is_reported(tmp_path, monkeypatch):
+    """Ошибка парсера pwsh становится ошибкой проверки с текстом сообщения."""
+    calls = []
+
+    class Result:
+        """Ответ парсера с синтаксической ошибкой."""
+
+        returncode = 1
+        stdout = b"Missing closing ')'"
+
+    def fake_run(command, **kwargs):
+        """Проверить вызов: только разбор файла, без выполнения примера."""
+        calls.append(command)
+        script = command[-1]
+        assert "Parser]::ParseFile(" in script and "Invoke-Expression" not in script
+        return Result()
+
+    monkeypatch.setattr(checks, "PWSH", "pwsh")
+    monkeypatch.setattr(checks.subprocess, "run", fake_run)
+    path = tmp_path / "guide.md"
+    path.write_text("```powershell\nif (\n```\n", encoding="utf-8")
+    errors, counts = checks.check_markdown(path, tmp_path)
+    assert len(calls) == 1 and calls[0][:3] == ["pwsh", "-NoProfile", "-NonInteractive"]
+    assert errors == [f"{path}:1: неверный PowerShell: Missing closing ')'"]
+    assert counts["powershell_unchecked"] == 0
+
+
+def test_ci_requires_powershell_parser(monkeypatch, capsys):
+    """С --require-powershell непроверенные PowerShell-примеры — ошибка."""
+    monkeypatch.setattr(checks, "PWSH", None)
+    assert checks.main(["--require-powershell"]) == 1
+    assert "pwsh не найден" in capsys.readouterr().err

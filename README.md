@@ -27,9 +27,10 @@ Linux, macOS (Intel and Apple Silicon) and Windows are supported: CI runs the Py
 
 Instructions ([docs/instructions/](docs/instructions/)):
 
-- [Quickstart](docs/instructions/quickstart.md): requirements, Compose stack with the operator UI, updating an existing stack, knowledge base indexing, host run
+- [Quickstart](docs/instructions/quickstart.md): requirements, supported platforms, Compose stack with the operator UI, updating an existing stack, knowledge base indexing, host run
+- [Windows and PowerShell](docs/instructions/windows.md): Git Bash, WSL or PowerShell; equivalents of every Bash construct used in the guides
 - [Using the API](docs/instructions/usage.md): business records, draft previews, knowledge search, agent, human review
-- [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, offline evaluations
+- [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, coverage gate, offline evaluations, portability checks
 - [CI and delivery to GHCR](docs/instructions/ci-and-delivery.md)
 - [Project structure](docs/instructions/project-structure.md)
 

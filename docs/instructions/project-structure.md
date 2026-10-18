@@ -6,7 +6,9 @@ Where each part of the application, tests, and documentation lives.
 
 ```text
 .github/workflows/
-  ci.yml                 # Python/database checks, Compose and GHCR delivery
+  ci.yml                 # Checks on Linux/macOS/Windows, Docker (amd64, arm64), GHCR delivery
+  dependency-updates.yml # Weekly dependency PR with the 14-day cutoff
+.gitattributes           # LF line endings on every operating system
 app/
   main.py                # /health, /ready, API lifecycle and router registration
   api/
@@ -22,7 +24,9 @@ app/
   knowledge/             # Article parsing, embeddings, Qdrant index and ingest CLI
   workflow/              # LangGraph review graph, PostgreSQL checkpointer, service
   services/              # Business checks, queries and explicit transactions
+                         # run_recovery.py finishes abandoned running analyses
   config.py              # DATABASE_URL from environment or .env
+  console.py             # UTF-8 output for command-line tools on any OS
   observability.py       # JSON log, X-Request-ID middleware, safe error fields
   db/
     base.py              # DeclarativeBase and constraint naming
@@ -64,15 +68,23 @@ tests/
   test_dependency_age.py # Locked packages at least 14 days old on PyPI
   test_security_scenarios.py  # Agent scenarios and deliberate-regression checks
   test_demo_scenario.py  # Demo script against a fake HTTP API
+  test_local_start.py    # Real Uvicorn and Streamlit start on the current OS
+  test_run_recovery.py   # Abandoned run recovery and its background monitor
+  test_release_delivery.py    # Release tags, image export and GHCR publication
+  test_update_dependencies.py # Weekly dependency PR preparation and writer
+  test_project_checks.py # Docstrings, links, Bash and PowerShell examples
   conftest.py            # In-memory checkpointer for every test by default
 scripts/
   smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
-  check_project.py       # Docstrings, Markdown links, Bash and JSON examples
+  check_project.py       # Docstrings, Markdown links, Bash, PowerShell and JSON examples
+  check_local_start.py   # Start API and UI as real processes on this computer
+  release_delivery.py    # Validate release tags, export and publish tested images
+  update_dependencies.py # Prepare and publish the weekly dependency PR
   demo_scenario.py       # Idempotent mock demo through the HTTP API
   check_dependency_age.py # Release-age policy for uv.lock and exclude-newer
   build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
 docs/
-  instructions/          # Quickstart, API usage, testing, CI and this file
+  instructions/          # Quickstart, Windows, API usage, testing, CI and this file
   guide/                 # PDF guide, build instructions and verification evidence
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian
@@ -87,6 +99,9 @@ docs/
   STAGE_09.md            # Evaluations and security checks guide in Russian
   STAGE_10.md            # Packaging and reproducible demo guide in Russian
   DEMO.md                # 5–7 minute demonstration walkthrough
+  RUN_RECOVERY.md        # Recovery of abandoned running analyses
+  RELEASES.md            # Version tags and publication of the API and UI images
+  DEPENDENCY_UPDATES.md  # Weekly dependency PRs and the 14-day rule
   VERIFICATION.md        # Checks actually run and their limits
   DEVELOPMENT_LOG.md     # Step-by-step implementation log
 compose.yaml             # PostgreSQL, Qdrant, migration, API, UI and isolated test services

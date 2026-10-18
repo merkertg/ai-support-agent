@@ -20,9 +20,9 @@
 | `docs/guide/ai-support-agent-guide.pdf` | Наглядное руководство; инструкция пересборки рядом. |
 | `docs/VERIFICATION.md` | Фактически выполненные проверки и их ограничения. |
 
-CI/CD публикует проверенный образ API в GHCR после успешных проверок.
-Образ UI собирается и проверяется в том же задании, но не публикуется:
-локально его собирает Compose. Автоматический
+CI/CD публикует оба проверенных образа в GHCR: API (`ghcr.io/merkertg/ai-support-agent`)
+и UI (`ghcr.io/merkertg/ai-support-agent-ui`) — после push в `main` или выбранного
+тега версии. Подробности — в [RELEASES.md](RELEASES.md). Автоматический
 деплой на внешний сервер не задан: ранее выбранный объём CD — контейнерные
 образы. Имя, теги и точный порядок заданий описаны в [CI_CD.md](CI_CD.md).
 
@@ -32,10 +32,18 @@ CI/CD публикует проверенный образ API в GHCR посл�
 проверок. Подробные требования — в [быстром запуске](instructions/quickstart.md).
 
 ```bash
-cd '/Users/arslanbakiev/Desktop/AI Forge/ai-support-agent'
 if [ ! -f .env ]; then
   cp .env.example .env
 fi
+uv sync --locked --group ui
+docker compose up --build --detach --wait --wait-timeout 180 ui
+docker compose exec -T api python -m app.knowledge.ingest
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 uv sync --locked --group ui
 docker compose up --build --detach --wait --wait-timeout 180 ui
 docker compose exec -T api python -m app.knowledge.ingest
@@ -50,6 +58,12 @@ docker compose exec -T api python -m app.knowledge.ingest
 ## 3. Создать данные и оставить решение человеку
 
 ```bash
+uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
 uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
 ```
 
@@ -141,6 +155,13 @@ uv run --locked python scripts/demo_scenario.py \
   --url http://127.0.0.1:8001 --verify-review
 ```
 
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+uv run --locked python scripts/demo_scenario.py `
+  --url http://127.0.0.1:8001 --verify-review
+```
+
 Для тем с суффиксами `— approve` и `— reject` скрипт создаёт по одному анализу:
 
 | Ветка | Проверяемый результат |
@@ -159,6 +180,12 @@ uv run --locked python scripts/demo_scenario.py \
 uv run --locked python scripts/demo_scenario.py --help
 ```
 
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
+uv run --locked python scripts/demo_scenario.py --help
+```
+
 | Аргумент | Значение |
 | --- | --- |
 | `--url` | Корень API; по умолчанию `http://127.0.0.1:8001`. Только HTTP(S), без credentials, пути и query. |
@@ -173,6 +200,16 @@ uv run --locked python scripts/demo_scenario.py --help
 ## 7. Проверить перед передачей проекта
 
 ```bash
+uv run --locked --group ui python scripts/check_project.py
+uv run --locked --group ui ruff check .
+uv run --locked --group ui ruff format --check .
+uv run --locked --group ui pytest tests/test_demo_scenario.py -q
+uv run --locked python -m evaluations.run
+```
+
+В PowerShell на Windows ([аналоги команд](instructions/windows.md)):
+
+```powershell
 uv run --locked --group ui python scripts/check_project.py
 uv run --locked --group ui ruff check .
 uv run --locked --group ui ruff format --check .
