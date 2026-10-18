@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse
 
 from app.agent.provider import get_agent_provider
 from app.api.dependencies import ApiSession
+from app.api.knowledge import get_knowledge_factory
 from app.api.routes import ResourceId
+from app.knowledge.index import IndexFactory
 from app.schemas.agents import AgentErrorRead, AgentRunRead, AnalyzeRequest
 from app.schemas.resources import ErrorRead
 from app.services import agents
@@ -45,6 +47,7 @@ def analyze_ticket(
     resource_id: ResourceId,
     session: ApiSession,
     provider_factory: Annotated[ProviderFactory, Depends(get_agent_factory)],
+    knowledge_factory: Annotated[IndexFactory, Depends(get_knowledge_factory)],
     payload: AnalyzeRequest | None = None,
 ) -> AgentRunRead:
     """Запустить инструменты чтения и сохранить черновик для проверки человеком.
@@ -54,7 +57,11 @@ def analyze_ticket(
     Синхронный маршрут работает в потоке и не блокирует async-цикл FastAPI.
     """
     return agents.analyze_ticket(
-        session, resource_id, payload or AnalyzeRequest(), provider_factory
+        session,
+        resource_id,
+        payload or AnalyzeRequest(),
+        provider_factory,
+        knowledge_factory,
     )
 
 

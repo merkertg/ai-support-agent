@@ -2,7 +2,7 @@
 [project]
 name = "ai-support-agent"
 version = "0.1.0"
-description = "AI-powered technical support system: LLM draft previews, PostgreSQL and CI/CD"
+description = "AI-powered technical support system: agent with tools, document search, PostgreSQL and CI/CD"
 readme = "README.md"
 # Ограничение проверяется при выборе Python для окружения проекта.
 requires-python = ">=3.12"
@@ -13,6 +13,7 @@ dependencies = [
     "openai>=3.35.0",  # Официальный SDK: Responses API и Structured Outputs.
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2,<3",
+    "qdrant-client>=1.19.1,<2",  # Официальный клиент векторной БД для поиска документов.
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]",   # ASGI-сервер и дополнения, включая автоперезапуск.
 ]
@@ -32,7 +33,11 @@ pythonpath = ["."]
 # Неизвестный marker считается ошибкой, а не тихо пропущенной проверкой.
 addopts = "--strict-markers"
 markers = [
-    "integration: tests requiring an isolated PostgreSQL database via TEST_DATABASE_URL",
+    "integration: tests requiring isolated PostgreSQL and Qdrant via TEST_DATABASE_URL and TEST_QDRANT_URL",
+]
+# Unit-тесты используют Qdrant в памяти процесса: индексы payload там не нужны.
+filterwarnings = [
+    "ignore:Payload indexes have no effect in the local Qdrant:UserWarning",
 ]
 
 # Ruff проверяет код с учётом синтаксиса Python 3.12.

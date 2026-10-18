@@ -33,6 +33,8 @@ COPY --chown=app:app app ./app
 # Alembic нужен отдельному migration-сервису и проверке актуальности схемы.
 COPY --chown=app:app migrations ./migrations
 COPY --chown=app:app alembic.ini ./alembic.ini
+# Статьи базы знаний индексирует команда python -m app.knowledge.ingest.
+COPY --chown=app:app knowledge ./knowledge
 USER app
 
 EXPOSE 8000

@@ -31,6 +31,13 @@ class AgentInvalidTurnError(LLMError):
     detail = "Агент получил некорректную последовательность ответов модели."
 
 
+class AgentInvalidCitationError(LLMError):
+    """Отклонить черновик со ссылкой на статью, которую агент не находил."""
+
+    status_code = 502
+    detail = "Черновик ссылается на источник, который не был найден в базе знаний."
+
+
 class AgentContextTooLongError(LLMError):
     """Остановить цикл до отправки слишком большого полного транскрипта."""
 

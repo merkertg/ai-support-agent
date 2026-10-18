@@ -1,15 +1,20 @@
-"""Запускать интеграционные проверки только в явно выбранной тестовой БД."""
+"""Запускать интеграционные проверки только в явно выбранных тестовых БД и Qdrant."""
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from qdrant_client import QdrantClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
 
 from app.config import Settings
+from app.knowledge.embeddings import MockEmbedder
+from app.knowledge.index import KnowledgeIndex
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,3 +75,54 @@ def migrated_engine(test_engine: Engine, migration_config: Config):
         yield test_engine
     finally:
         command.downgrade(migration_config, "base")
+
+
+def required_test_url(name: str) -> str:
+    """Прочитать явный адрес тестового сервиса: локально skip, в CI — ошибка."""
+    value = os.environ.get(name)
+    if not value:
+        message = f"Укажите {name} для отдельного тестового сервиса"
+        if os.environ.get("CI", "").lower() in {"1", "true", "yes"}:
+            pytest.fail(message)
+        pytest.skip(message)
+    return value
+
+
+@pytest.fixture(scope="session")
+def test_qdrant_url() -> str:
+    """Использовать только явно заданный тестовый Qdrant, а не QDRANT_URL из .env."""
+    return required_test_url("TEST_QDRANT_URL")
+
+
+@pytest.fixture
+def qdrant_collection(test_qdrant_url: str) -> Iterator[str]:
+    """Выдать уникальную коллекцию test_* и удалить её после теста.
+
+    Тест не трогает другие коллекции сервера, даже если адрес указан неверно.
+    """
+    name = f"test_{uuid4().hex[:12]}"
+    try:
+        yield name
+    finally:
+        client = QdrantClient(url=test_qdrant_url, check_compatibility=False)
+        try:
+            if client.collection_exists(name):
+                client.delete_collection(name)
+        finally:
+            client.close()
+
+
+@pytest.fixture
+def index_factory(test_qdrant_url: str, qdrant_collection: str):
+    """Открывать индекс тестовой коллекции так же, как настоящая фабрика."""
+
+    def factory() -> KnowledgeIndex:
+        """Создать новый клиент на каждый вызов, как в работающем API."""
+        return KnowledgeIndex(
+            QdrantClient(url=test_qdrant_url, timeout=5, check_compatibility=False),
+            qdrant_collection,
+            MockEmbedder(256),
+            min_score=0.2,
+        )
+
+    return factory

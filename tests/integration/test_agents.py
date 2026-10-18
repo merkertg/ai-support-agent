@@ -8,6 +8,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from qdrant_client import QdrantClient
 from sqlalchemy import Engine, func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -19,7 +20,12 @@ from app.agent.provider import MOCK_MARKER, MockAgentProvider
 from app.agent.tools import SQLToolExecutor, ToolDataUnavailable
 from app.api.agents import get_agent_factory
 from app.api.dependencies import get_api_session
+from app.api.knowledge import get_knowledge_factory
 from app.db.base import Base
+from app.knowledge.config import DEFAULT_KNOWLEDGE_DIR
+from app.knowledge.documents import load_documents
+from app.knowledge.embeddings import MockEmbedder
+from app.knowledge.index import KnowledgeIndex
 from app.llm.config import get_llm_settings
 from app.llm.errors import LLMConfigurationError, LLMTimeoutError, LLMUnavailableError
 from app.main import app
@@ -53,6 +59,29 @@ def mock_provider(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[None]:
         get_agent_settings.cache_clear()
 
 
+def memory_index_factory(engine: Engine | None = None):
+    """Открывать индекс статей репозитория в памяти процесса без сервера Qdrant.
+
+    Если передан engine, фабрика проверяет, что в момент поиска ни одно
+    SQL-соединение пула не занято.
+    """
+    documents = load_documents(DEFAULT_KNOWLEDGE_DIR)
+
+    def factory() -> KnowledgeIndex:
+        """Создать заполненный индекс для одного вызова инструмента."""
+        if engine is not None:
+            assert engine.pool.checkedout() == 0
+        index = KnowledgeIndex(
+            QdrantClient(location=":memory:"), "kb", MockEmbedder(256), min_score=0.2
+        )
+        index.ensure_collection()
+        for document in documents:
+            index.replace_document(document)
+        return index
+
+    return factory
+
+
 @pytest.fixture
 def agent_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Session]]]:
     """Выдать каждому запросу отдельную наблюдаемую Session тестовой БД *_test."""
@@ -70,6 +99,8 @@ def agent_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Ses
 
     previous_overrides = app.dependency_overrides.copy()
     app.dependency_overrides[get_api_session] = session_override
+    factory = memory_index_factory(migrated_engine)
+    app.dependency_overrides[get_knowledge_factory] = lambda: factory
     try:
         with TestClient(app) as client:
             yield client, sessions
@@ -89,8 +120,9 @@ def scope(migrated_engine: Engine) -> dict[str, int]:
     with Session(migrated_engine) as session, session.begin():
         customer = Customer(name="Клиент A", email=CUSTOMER_EMAIL, company="Альфа")
         other_customer = Customer(name="Клиент B", email="other@example.test")
-        product = Product(name="TechFlow Server", code="TF-AGENT-SERVER")
-        other_product = Product(name="TechFlow Desktop", code="TF-AGENT-DESKTOP")
+        # Коды совпадают со статьями базы знаний: поиск найдёт статьи продукта.
+        product = Product(name="TechFlow Server", code="techflow-server")
+        other_product = Product(name="TechFlow Desktop", code="techflow-desktop")
         session.add_all([customer, other_customer, product, other_product])
         session.flush()
 
@@ -234,6 +266,7 @@ def test_mock_analysis_persists_completed_run_and_one_pending_suggestion(
         "get_customer",
         "get_ticket_history",
         "get_license",
+        "search_knowledge",
     ]
     assert all(item["result"]["ok"] is True for item in run["tool_trace"])
     license_call = run["tool_trace"][3]
@@ -241,7 +274,14 @@ def test_mock_analysis_persists_completed_run_and_one_pending_suggestion(
     assert license_call["result"]["data"]["valid"] is True
     history = run["tool_trace"][2]["result"]["data"]["tickets"]
     assert [item["id"] for item in history] == [scope["previous"]]
-    assert set(run["result"]) == {"summary", "category", "draft_reply"}
+    assert set(run["result"]) == {"summary", "category", "draft_reply", "sources"}
+    # Ссылки — только на статьи, найденные поиском в этом запуске.
+    found = {
+        item["document_key"]
+        for item in run["tool_trace"][4]["result"]["data"]["documents"]
+    }
+    assert run["result"]["sources"][0] == "KB-SERVER-START"
+    assert set(run["result"]["sources"]) <= found
     assert run["result"]["category"] == "license_question"
     assert MOCK_MARKER in run["result"]["draft_reply"]
     assert "лицензия действующая" in run["result"]["draft_reply"]
@@ -284,6 +324,7 @@ def test_analysis_without_license_hint_does_not_claim_license_check(
         "get_ticket",
         "get_customer",
         "get_ticket_history",
+        "search_knowledge",
     ]
     assert run["result"]["category"] == "technical_issue"
     assert "Лицензия не проверялась" in run["result"]["draft_reply"]
@@ -326,8 +367,8 @@ def test_postgres_connection_is_released_while_provider_waits(
     ("variable", "value", "error", "trace_length"),
     [
         # Mock с ключом требует три шага: второй завершается без финала.
-        ("AGENT_MAX_STEPS", "2", AgentStepLimitError, 4),
-        # Пакет второго шага (три вызова) не помещается в лимит и не исполняется.
+        ("AGENT_MAX_STEPS", "2", AgentStepLimitError, 5),
+        # Пакет второго шага (четыре вызова) не помещается в лимит и не исполняется.
         ("AGENT_MAX_TOOL_CALLS", "2", AgentToolLimitError, 1),
     ],
 )

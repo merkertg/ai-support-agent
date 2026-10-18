@@ -16,6 +16,7 @@ from app.agent.contracts import (
 )
 from app.agent.errors import (
     AgentContextTooLongError,
+    AgentInvalidCitationError,
     AgentInvalidTurnError,
     AgentStepLimitError,
     AgentTimeoutError,
@@ -70,6 +71,25 @@ class AgentRuntime:
             total_tokens=usage.total_tokens
             + (previous.total_tokens if previous else 0),
         )
+
+    def _found_documents(self) -> set[str]:
+        """Собрать ключи статей из успешных вызовов search_knowledge этого запуска."""
+        found: set[str] = set()
+        for item in self.progress.tool_trace:
+            if item.name != "search_knowledge" or item.result.get("ok") is not True:
+                continue
+            documents = item.result.get("data", {}).get("documents", [])
+            found.update(
+                document["document_key"]
+                for document in documents
+                if isinstance(document, dict) and "document_key" in document
+            )
+        return found
+
+    def _check_sources(self, sources: list[str]) -> None:
+        """Разрешить ссылаться только на статьи, реально возвращённые поиском."""
+        if not set(sources) <= self._found_documents():
+            raise AgentInvalidCitationError()
 
     def _validate_turn(self, turn: AgentTurn, seen_ids: set[str]) -> None:
         """Проверить весь пакет до первого SQL-запроса, не исполняя его частично."""
@@ -126,6 +146,8 @@ class AgentRuntime:
             history.extend(turn.output_items)
             self._check_transcript(history)
             if turn.final is not None:
+                # Модель не может «процитировать» статью, которую не находила.
+                self._check_sources(getattr(turn.final, "sources", []))
                 return AgentOutcome(
                     final=turn.final,
                     model=turn.model,

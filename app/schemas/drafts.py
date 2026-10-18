@@ -2,8 +2,9 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+from app.schemas.knowledge import DocumentKey
 from app.schemas.resources import PositiveId, TicketPriority
 
 # Эти значения образуют JSON Schema, которую также получает реальная модель.
@@ -24,6 +25,31 @@ class DraftContent(BaseModel):
     summary: Summary
     category: DraftCategory
     draft_reply: Reply
+
+
+class AgentDraftContent(DraftContent):
+    """Черновик агента со ссылками на статьи базы знаний, найденные в запуске.
+
+    Поле обязательное: строгая JSON Schema требует перечислить все свойства.
+    Пустой список означает, что ответ подготовлен без статей. Какие ключи
+    действительно были найдены, проверяет runtime агента, а не модель.
+    """
+
+    sources: list[DocumentKey] = Field(max_length=5)
+
+    @field_validator("sources")
+    @classmethod
+    def unique_sources(cls, value: list[str]) -> list[str]:
+        """Запретить повтор одной статьи в списке источников."""
+        if len(value) != len(set(value)):
+            raise ValueError("источники не должны повторяться")
+        return value
+
+
+class AgentResultRead(DraftContent):
+    """Прочитать сохранённый итог; запуски этапа 05 не имели поля sources."""
+
+    sources: list[str] = Field(default_factory=list)
 
 
 class DraftContext(BaseModel):

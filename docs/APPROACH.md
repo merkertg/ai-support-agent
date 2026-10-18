@@ -6,9 +6,9 @@ Support operators need customer information, license details, and technical docu
 
 The project uses fictional TechFlow products and artificial support data.
 
-## Current implementation: Stages 01–05
+## Current implementation: Stages 01–06
 
-The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client produces a structured draft preview from an existing ticket without modifying stored records. A bounded agent gathers facts through four read-only tools and saves its run together with a pending reply suggestion for human review.
+The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client produces a structured draft preview from an existing ticket without modifying stored records. Fictional Markdown support articles are indexed into Qdrant and searchable by product. A bounded agent gathers facts through five read-only tools, including knowledge search, and saves its run together with a pending reply suggestion that cites only the articles it found.
 
 ```text
 HTTP client → Uvicorn → FastAPI
@@ -17,10 +17,13 @@ HTTP client → Uvicorn → FastAPI
                          ├─ /api/* → routers → services → PostgreSQL
                          ├─ POST /api/tickets/{id}/analyze → agent runtime
                          │      ├─ provider (mock / OpenAI Responses)
-                         │      └─ read-only tools → PostgreSQL
+                         │      ├─ read-only tools → PostgreSQL
+                         │      └─ search_knowledge → embeddings → Qdrant
+                         ├─ /api/knowledge/* → embeddings → Qdrant
                          └─ /docs and /openapi.json → API documentation
 
 Explicit demo CLI → SQLAlchemy session → PostgreSQL
+Explicit ingest CLI → knowledge/*.md → Qdrant points + PostgreSQL registry
 Alembic migrations → versioned PostgreSQL schema
 ```
 
@@ -38,11 +41,12 @@ Alembic migrations → versioned PostgreSQL schema
 | API | FastAPI | HTTP routing, JSON responses and generated OpenAPI |
 | ASGI server | Uvicorn | Local and container HTTP serving |
 | Database | PostgreSQL 17 | Persistent records, relational links and constraints |
+| Vector database | Qdrant 1.19 with qdrant-client | Article chunk vectors, payload filters and similarity search |
 | Database access | SQLAlchemy 2 with psycopg 3 | Typed models, connections, sessions and transactions |
 | Schema changes | Alembic | Ordered schema creation, comparison and explicit rollback |
 | Configuration | pydantic-settings | Environment and `.env` loading with validation |
 | Dependency management | uv | Isolated environment and locked dependencies |
-| Testing | Pytest, TestClient/HTTPX and real PostgreSQL | HTTP behavior, configuration, transactions and migrations |
+| Testing | Pytest, TestClient/HTTPX, real PostgreSQL and Qdrant | HTTP behavior, configuration, transactions, migrations and search |
 | Code checks | Ruff | Formatting and common Python issues |
 | Local orchestration | Docker Compose | Database health, migrations, API startup and volumes |
 
@@ -58,13 +62,13 @@ Alembic migrations → versioned PostgreSQL schema
 | `License` / `licenses` | Customer/product links, unique key, status and validity dates |
 | `Ticket` / `tickets` | Customer/product links, subject, description, priority and status |
 | `TicketMessage` / `ticket_messages` | Message content, author type and optional employee reference |
-| `KnowledgeDocument` / `knowledge_documents` | Metadata of future Markdown articles, unique document key and source path |
+| `KnowledgeDocument` / `knowledge_documents` | Registry of indexed Markdown articles: key, source path, product code, checksum, chunk count and embedding signature |
 | `AgentRun` / `agent_runs` | Agent run for a ticket: status, provider/model, steps, tool trace, token usage, structured result or safe error |
 | `AgentSuggestion` / `agent_suggestions` | Suggested reply and the employee's review decision; the agent creates only `pending` |
 
 Foreign keys maintain record ownership. Database checks restrict statuses, priorities, date ranges, message authors, and suggestion review fields. Indexed foreign keys support joins. Identity keys are `BIGINT`; recorded timestamps include time-zone information.
 
-Knowledge documents store metadata rather than a second copy of future Markdown content. Suggestions reach their ticket through `agent_runs.ticket_id`, avoiding a duplicate ticket reference. Since Stage 05 the agent writes these tables; approving or rejecting a suggestion is not implemented yet. Employee roles are data constraints and do not enforce access control.
+Knowledge documents store metadata rather than a second copy of the Markdown content; article text and vectors live in Qdrant. Suggestions reach their ticket through `agent_runs.ticket_id`, avoiding a duplicate ticket reference. Since Stage 05 the agent writes these tables; approving or rejecting a suggestion is not implemented yet. Employee roles are data constraints and do not enforce access control.
 
 `updated_at` is initialized by PostgreSQL and updated by SQLAlchemy when it issues an update for the mapped record. Direct SQL updates must set it explicitly; this stage creates no timestamp trigger.
 
@@ -108,16 +112,30 @@ The service never holds a database connection while waiting for the provider. It
 
 The mock provider performs three deterministic steps with the real tools and labels its reply as a demonstration. The OpenAI adapter uses the Responses API with strict function schemas, `store=False`, no retries, disabled truncation, and replays all output items, including `reasoning.encrypted_content`. It is tested with the real SDK and a substituted HTTP transport; no live model request has been made. Migration `0002_agent_runtime` adds the run fields with backward-compatible defaults. The [Stage 05 guide](STAGE_05.md) documents the full flow.
 
+## Knowledge base and retrieval
+
+Stage 06 adds `knowledge/` (seven fictional articles), `app/knowledge`, `GET /api/knowledge/status`, and `POST /api/knowledge/search`. Each article starts with a small `key: value` header (`document_key`, `title`, optional `product_code` and `product_version`); unknown or duplicated fields are rejected. The body is split by `## ` sections into chunks of at most 1200 characters; article and section titles are included in the embedded text.
+
+`python -m app.knowledge.ingest` reconciles the folder with the index. It skips articles whose checksum, embedding signature, chunk count, and actual Qdrant point count all match the registry; reindexes the rest (deterministic UUID5 point IDs overwrite existing points, and stale tail chunks are deleted); and removes articles that disappeared from the folder, including orphan points without registry rows. Vectors are written before the registry commit, so a failed commit leads to reindexing on the next run. No SQL connection is held during embedding or Qdrant requests.
+
+The default mock embedder hashes five-letter word stems into a signed, normalized 256-dimensional vector. It is deterministic and lexical, not semantic; `KNOWLEDGE_MIN_SCORE=0.2` drops weak matches. The OpenAI embedder calls `embeddings.create` with an explicit model and dimensions, batches of 64, no retries, and validates order, count, size, and finite values. Every point stores an embedding signature (`provider:model:dimensions`); search filters by it, and a collection with a different vector size is reported as incompatible.
+
+Search filters by `scope`: the given product code plus `general`, or all articles without a code. The agent tool `search_knowledge` takes only `query` and `limit`; the server supplies the ticket's product code after a read-only scope check and closes the SQL session before searching. It returns the best chunk per article. The final draft schema `AgentDraftContent` adds a required `sources` list, and the runtime rejects any key not returned by `search_knowledge` in the same run. Knowledge outages become a tool error, so analysis continues without sources. Migration `0003_knowledge_index` adds the registry fields. The [Stage 06 guide](STAGE_06.md) documents the flow.
+
 ## Schema lifecycle and local startup
 
-The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. The second revision, `0002_agent_runtime`, adds agent run fields and CHECK constraints while preserving existing rows. Runtime startup never calls `Base.metadata.create_all()`.
+The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. The second revision, `0002_agent_runtime`, adds agent run fields and CHECK constraints while preserving existing rows; the third, `0003_knowledge_index`, adds the knowledge index registry fields. Runtime startup never calls `Base.metadata.create_all()`.
 
 Compose uses one application image for migration and API services:
 
 ```text
-PostgreSQL healthy → alembic upgrade head succeeds → API passes /ready
-        db                      migrate                     api
+PostgreSQL healthy → alembic upgrade head succeeds ─┐
+        db                      migrate             ├→ API passes /ready
+Qdrant healthy (/readyz) ───────────────────────────┘          api
+       qdrant
 ```
+
+The Qdrant named volume retains the index across `docker compose down`, like the PostgreSQL volume. Qdrant telemetry is disabled in Compose.
 
 The PostgreSQL named volume retains development records after normal `docker compose down` and later startup. On the host, the default database port is `5433`, and the Compose API is available on `8001`. Services inside Docker use `db:5432`; host Python uses `127.0.0.1:5433`. These separate URLs are shown in `.env.example`.
 
@@ -127,7 +145,7 @@ For development with automatic reload, only PostgreSQL needs to run in Docker. A
 
 ## Verification and database isolation
 
-Unit tests cover the HTTP contract, safe readiness failures, configuration, engine/session behavior, and the smoke CLI. Real PostgreSQL integration tests apply migrations, compare models with the resulting schema, exercise records and constraints, and check transaction behavior and migration rollback. Agent integration tests cover saved runs and suggestions, released connections during provider turns, failed runs with partial progress, tool scope, read-only tool transactions, and upgrading Stage 02 data to the agent schema.
+Unit tests cover the HTTP contract, safe readiness failures, configuration, engine/session behavior, and the smoke CLI. Real PostgreSQL integration tests apply migrations, compare models with the resulting schema, exercise records and constraints, and check transaction behavior and migration rollback. Agent integration tests cover saved runs and suggestions, released connections during provider turns, failed runs with partial progress, tool scope, read-only tool transactions, and upgrading Stage 02 data to the agent schema. Knowledge integration tests run against a real Qdrant via an explicit `TEST_QDRANT_URL`, each in its own temporary `test_*` collection: ingest, idempotency, changed and removed articles, recovery of lost points, HTTP search and status, agent citations, and the `0002 → 0003` upgrade. Unit tests use an in-process Qdrant.
 
 The integration fixtures reset their schema between scenarios. They require an explicit `TEST_DATABASE_URL` pointing to a database whose name ends in `_test`; they never reuse `DATABASE_URL` as a fallback. Local runs without a test URL report skipped integration tests. A missing URL in CI is an error.
 
@@ -137,11 +155,11 @@ Run lint, formatting, and the full test suite using the commands in the [README]
 
 ## CI/CD and Docker packaging
 
-`.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. The Python job installs locked dependencies, starts its PostgreSQL 17 service, applies migrations, checks schema drift with `alembic check`, runs Ruff lint and formatting checks, and executes all Pytest tests against the explicit test database. The independent lint, formatting, and test steps still report their outcomes if another check fails.
+`.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. The Python job installs locked dependencies, starts its PostgreSQL 17 and Qdrant 1.19.1 services, applies migrations, checks schema drift with `alembic check`, runs Ruff lint and formatting checks, and executes all Pytest tests against the explicit test database. The independent lint, formatting, and test steps still report their outcomes if another check fails.
 
-After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-agent` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. With `--check-llm`, a status guard requires configured mock before any POST. The smoke explicitly creates three fictional fixture records, requests a preview, and verifies the ticket remains unchanged. `--check-agent` includes these checks, adds a fictional license, runs the mock agent, checks the four-tool trace and pending suggestion, and reads the same run back through GET. CI fixes mock mode and supplies no OpenAI credentials. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot and the saved agent run, compares both with the originals, and runs the HTTP smoke again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
+After that job succeeds, the container job builds one runtime image, starts the Compose database, migration, Qdrant, and API services with `--no-build`, and indexes the knowledge base. `scripts/smoke_test.py --check-agent` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. With `--check-llm`, a status guard requires configured mock before any POST. The smoke explicitly creates three fictional fixture records, requests a preview, and verifies the ticket remains unchanged. `--check-agent` also includes the read-only `--check-knowledge` (mock embeddings, ready index, known top article, product isolation), adds a fictional license, runs the mock agent, checks the five-tool trace, the citation of a found article, and the pending suggestion, and reads the same run back through GET. CI fixes mock mode and supplies no OpenAI credentials. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, the saved agent run, and the same search results, compares them with the originals, verifies that a second indexing run changes nothing, and runs the HTTP smoke again. This removes and recreates containers while preserving the named PostgreSQL and Qdrant volumes. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
 
-The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration and migrations. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
+The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration, migrations, and the knowledge articles. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
 
 On a successful push to `main`, that same tested image is exported as an artifact, loaded and identified again in the publication job, and pushed to GHCR without rebuilding. Each commit receives a full SHA tag; only the current `main` tip updates `latest`. Publications queue sequentially. The workflow uses `GITHUB_TOKEN`, with `packages: write` limited to the publication job.
 
@@ -165,8 +183,8 @@ FastAPI routes → business services → repositories → PostgreSQL
 
 The interface will communicate through the API. Server-side services enforce the data scope and expose a restricted set of agent tools. The agent prepares a suggestion for human review. LangGraph will be introduced on top of the basic tool-calling loop implemented in Stage 05.
 
-PostgreSQL, its schema, create/read REST business operations, LLM draft previews, and the bounded agent with read-only tools are implemented. Qdrant, document retrieval, authentication, approving or rejecting suggestions, and the operator interface remain future work.
+PostgreSQL, its schema, create/read REST business operations, LLM draft previews, the bounded agent with read-only tools, and Qdrant knowledge search with agent citations are implemented. LangGraph orchestration, authentication, approving or rejecting suggestions, retrieval quality evaluation, and the operator interface remain future work.
 
 ## Next step
 
-Stage 06 will add a knowledge base with embeddings and Qdrant search, so the agent can cite documentation sources in its draft. Human review decisions, LangGraph orchestration, and the operator interface follow the roadmap.
+Stage 07 will introduce a LangGraph workflow and human review decisions: an employee approves or rejects a pending suggestion. The operator interface and retrieval/agent evaluations follow the roadmap.

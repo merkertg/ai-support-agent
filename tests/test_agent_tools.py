@@ -53,6 +53,11 @@ def test_unknown_tool_cannot_resolve_python_name(executor, name: str) -> None:
         ("get_ticket_history", '{"customer_id":2,"limit":0}'),
         ("get_ticket_history", '{"customer_id":2,"limit":true}'),
         ("get_ticket_history", '{"customer_id":2}'),
+        ("search_knowledge", '{"query":"ok","limit":3}'),
+        ("search_knowledge", '{"query":"сервер","limit":6}'),
+        ("search_knowledge", '{"query":"сервер"}'),
+        ("search_knowledge", '{"query":"' + "я" * 301 + '","limit":3}'),
+        ("search_knowledge", '{"query":"сервер","limit":3,"product_code":"x"}'),
     ],
 )
 def test_invalid_arguments_never_reach_database(
@@ -86,6 +91,7 @@ def test_all_tool_schemas_require_declared_fields_and_forbid_extras() -> None:
         "get_customer",
         "get_license",
         "get_ticket_history",
+        "search_knowledge",
     }
     for item in tools.TOOL_DEFINITIONS:
         assert item["type"] == "function"

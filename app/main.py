@@ -19,6 +19,7 @@ from app.api.agents import router as agents_router
 from app.api.drafts import llm_error_handler
 from app.api.drafts import router as drafts_router
 from app.api.errors import database_error_handler, resource_error_handler
+from app.api.knowledge import router as knowledge_router
 from app.api.routes import router as api_router
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_session
 from app.llm.errors import LLMError
@@ -125,6 +126,7 @@ def ready(
 app.include_router(api_router)
 app.include_router(drafts_router)
 app.include_router(agents_router)
+app.include_router(knowledge_router)
 app.add_exception_handler(AgentRunFailure, agent_error_handler)
 app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(ResourceError, resource_error_handler)

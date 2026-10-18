@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from app.agent.contracts import ToolTrace
-from app.schemas.drafts import DraftContent, Provider, TokenUsage
+from app.schemas.drafts import AgentResultRead, Provider, TokenUsage
 from app.schemas.resources import CreateSchema, LicenseKey
 
 
@@ -40,7 +40,7 @@ class AgentRunRead(BaseModel):
     steps: int
     tool_trace: list[ToolTrace]
     usage: TokenUsage | None
-    result: DraftContent | None
+    result: AgentResultRead | None
     suggestion: SuggestionRead | None
 
 

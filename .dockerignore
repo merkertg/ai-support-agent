@@ -18,7 +18,7 @@
 .vscode/
 *.log
 
-# В runtime нужны app/, migrations/ и alembic.ini; локальные Compose-настройки не нужны.
+# В runtime нужны app/, migrations/, knowledge/ и alembic.ini; Compose не нужен.
 # Тесты и инструкции проверяются в CI вне финального образа.
 tests/
 scripts/

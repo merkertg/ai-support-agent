@@ -11,11 +11,13 @@ from app.agent.contracts import AgentContext, AgentProgress, AgentProvider
 from app.agent.provider import get_agent_provider
 from app.agent.runtime import AgentRuntime
 from app.agent.tools import SQLToolExecutor
+from app.knowledge.index import IndexFactory
 from app.llm.errors import LLMError, LLMUnavailableError
 from app.models import AgentRun, AgentSuggestion, Ticket
 from app.schemas.agents import AgentRunRead, AnalyzeRequest, SuggestionRead
-from app.schemas.drafts import DraftContent
+from app.schemas.drafts import AgentDraftContent
 from app.services.errors import ResourceNotFound
+from app.services.knowledge import open_configured_index
 
 # Фабрика возвращается из Depends без вызова. Существование обращения
 # проверяем раньше конфигурации внешнего провайдера, как и в /draft.
@@ -69,7 +71,7 @@ def finish_run(
     run_id: int,
     progress: AgentProgress,
     *,
-    result: DraftContent | None = None,
+    result: AgentDraftContent | None = None,
     error: LLMError | None = None,
     model: str | None = None,
 ) -> None:
@@ -90,7 +92,7 @@ def finish_run(
             run.error_message = error.detail
             run.result = None
         else:
-            # Только проверенный DraftContent создаёт предложение. Транзакция
+            # Только проверенный черновик создаёт предложение. Транзакция
             # сохраняет completed и pending вместе, без промежуточного успеха.
             if result is None:
                 raise ValueError("Для успешного запуска требуется результат")
@@ -112,6 +114,7 @@ def analyze_ticket(
     ticket_id: int,
     payload: AnalyzeRequest,
     provider_factory: ProviderFactory = get_agent_provider,
+    knowledge_factory: IndexFactory | None = open_configured_index,
 ) -> AgentRunRead:
     """Прочитать границы доступа, освободить БД и выполнить ограниченный цикл.
 
@@ -134,7 +137,8 @@ def analyze_ticket(
     # Некорректная конфигурация не должна оставлять фиктивный running.
     provider = provider_factory()
     settings = get_agent_settings()
-    runtime = AgentRuntime(provider, SQLToolExecutor(engine, context), settings)
+    executor = SQLToolExecutor(engine, context, knowledge=knowledge_factory)
+    runtime = AgentRuntime(provider, executor, settings)
     with session.begin():
         run = AgentRun(
             ticket_id=ticket_id,

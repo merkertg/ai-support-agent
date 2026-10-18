@@ -1,7 +1,8 @@
 """Схема поддержки: клиенты, лицензии, обращения и история работы агента.
 
 Эти классы описывают данные. Они не реализуют API, авторизацию, запуск LLM
-или поиск по базе знаний. Реальную схему PostgreSQL изменяет только Alembic.
+или поиск: тексты и векторы статей хранит Qdrant, здесь — только реестр.
+Реальную схему PostgreSQL изменяет только Alembic.
 """
 
 from datetime import datetime
@@ -161,21 +162,30 @@ class TicketMessage(Base):
 
 
 class KnowledgeDocument(Base):
-    """Метаданные будущей Markdown-статьи; текст и поиск появятся позднее."""
+    """Реестр Markdown-статьи: метаданные и сведения о её записи в Qdrant."""
 
     __tablename__ = "knowledge_documents"
+    __table_args__ = (CheckConstraint("chunk_count >= 0", name="chunk_count"),)
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     # Ключ для ссылок из ответов; путь указывает на исходный Markdown-файл.
     document_key: Mapped[str] = mapped_column(String(64), unique=True)
     title: Mapped[str] = mapped_column(String(300))
     source_path: Mapped[str] = mapped_column(String(1024), unique=True)
-    # NULL означает общий документ. Удаление продукта сохраняет метаданные.
+    # Область поиска задаёт код продукта из заголовка статьи; NULL — общая статья.
+    product_code: Mapped[str | None] = mapped_column(String(64))
+    # Справочная связь с каталогом: заполняется, если продукт с кодом уже есть.
+    # Удаление продукта сохраняет метаданные и не меняет область поиска.
     product_id: Mapped[int | None] = mapped_column(
         ForeignKey("products.id", ondelete="SET NULL"), index=True
     )
     product_version: Mapped[str | None] = mapped_column(String(64))
+    # SHA-256 исходного файла: изменение текста требует новой индексации.
     checksum: Mapped[str | None] = mapped_column(String(128))
+    # Сколько фрагментов и в каком пространстве векторов записано в Qdrant.
+    chunk_count: Mapped[int] = mapped_column(Integer, server_default="0")
+    embedding_signature: Mapped[str | None] = mapped_column(String(300))
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

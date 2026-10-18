@@ -12,6 +12,7 @@ from app.agent.contracts import AgentContext, AgentToolCall, AgentTurn
 from app.agent.errors import (
     AgentConfigurationError,
     AgentContextTooLongError,
+    AgentInvalidCitationError,
     AgentInvalidTurnError,
     AgentStepLimitError,
     AgentTimeoutError,
@@ -20,7 +21,7 @@ from app.agent.errors import (
 from app.agent.provider import MOCK_MARKER, MockAgentProvider
 from app.agent.runtime import MAX_TRANSCRIPT_CHARACTERS, AgentRuntime
 from app.llm.errors import LLMUnavailableError
-from app.schemas.drafts import DraftContent, TokenUsage
+from app.schemas.drafts import AgentDraftContent, DraftContent, TokenUsage
 
 CONTEXT = AgentContext(7, 2, 3)
 FINAL = DraftContent(
@@ -316,6 +317,13 @@ def test_mock_uses_actual_tool_results_without_network(hint, valid) -> None:
             "get_customer": {"customer": {"id": 2}},
             "get_ticket_history": {"tickets": [{"id": 1}]},
             "get_license": {"license": {"status": "active"}, "valid": valid},
+            "search_knowledge": {
+                "documents": [
+                    {"document_key": "KB-SERVER-START", "title": "Сервер"},
+                    {"document_key": "KB-SERVER-START", "title": "Повтор"},
+                    {"document_key": "KB-SUPPORT-DATA", "title": "Сведения"},
+                ]
+            },
         }[name]
         return json.loads(arguments), {"ok": True, "data": data}
 
@@ -324,7 +332,11 @@ def test_mock_uses_actual_tool_results_without_network(hint, valid) -> None:
     assert MOCK_MARKER in result.final.draft_reply
     assert "Не запускается" in result.final.summary
     assert names[:3] == ["get_ticket", "get_customer", "get_ticket_history"]
+    assert names[-1] == "search_knowledge"
     assert ("get_license" in names) == (hint is not None)
+    # Повтор статьи не дублирует источник; цитируются только найденные ключи.
+    assert result.final.sources == ["KB-SERVER-START", "KB-SUPPORT-DATA"]
+    assert "KB-SERVER-START: Сервер" in result.final.draft_reply
     if hint is None:
         assert "Лицензия не проверялась" in result.final.draft_reply
     elif valid:
@@ -349,6 +361,79 @@ def test_mock_never_turns_tool_error_into_license_success() -> None:
     assert "не подтверждена" in result.final.draft_reply
     assert "История клиента недоступна" in result.final.draft_reply
     assert "лицензия действующая" not in result.final.draft_reply
+    assert "База знаний недоступна" in result.final.draft_reply
+    assert result.final.sources == []
+
+
+def search_turn() -> AgentTurn:
+    """Вызвать search_knowledge одним пакетом протокола Responses."""
+    call = AgentToolCall("search-1", "search_knowledge", '{"query":"сервер","limit":3}')
+    return AgentTurn(
+        [{"type": "function_call", "call_id": "search-1", "name": call.name}],
+        [call],
+        None,
+        "test-model",
+    )
+
+
+def cited_final(*sources: str) -> AgentTurn:
+    """Вернуть черновик со ссылками на указанные статьи."""
+    final = AgentDraftContent(
+        summary="Сбой", category="technical_issue", draft_reply="Ответ", sources=sources
+    )
+    return AgentTurn([{"type": "message"}], [], final, "test-model")
+
+
+def search_executor(result: dict) -> Callable:
+    """Вернуть заданный результат поиска для любого вызова инструмента."""
+
+    def execute(name: str, arguments: str) -> tuple[dict, dict]:
+        """Не обращаться к Qdrant: результат поиска задан тестом."""
+        return {"query": "сервер", "limit": 3}, result
+
+    return execute
+
+
+FOUND = {"ok": True, "data": {"documents": [{"document_key": "KB-SERVER-START"}]}}
+
+
+def test_sources_found_by_search_are_accepted() -> None:
+    """Ссылка на статью из результата поиска сохраняется в итоге."""
+    provider = ScriptedProvider([search_turn(), cited_final("KB-SERVER-START")])
+    result = AgentRuntime(provider, search_executor(FOUND)).run(CONTEXT)
+    assert result.final.sources == ["KB-SERVER-START"]
+
+
+@pytest.mark.parametrize(
+    ("search_result", "cited"),
+    [
+        # Статья существует в базе, но этот запуск её не находил.
+        (FOUND, ("KB-PASSWORD-RESET",)),
+        # Ошибка поиска не даёт права ссылаться на какую-либо статью.
+        (
+            {"ok": False, "error": {"code": "knowledge_unavailable"}},
+            ("KB-SERVER-START",),
+        ),
+        # Результат не search_knowledge не считается найденным источником.
+        ({"ok": True, "data": {"documents": []}}, ("KB-SERVER-START",)),
+    ],
+)
+def test_sources_outside_search_results_stop_the_run(search_result, cited) -> None:
+    """Модель не может процитировать статью, которой нет в результатах поиска."""
+    provider = ScriptedProvider([search_turn(), cited_final(*cited)])
+    runtime = AgentRuntime(provider, search_executor(search_result))
+    with pytest.raises(AgentInvalidCitationError):
+        runtime.run(CONTEXT)
+    assert runtime.progress.steps == 2
+
+
+def test_citation_without_any_search_is_rejected() -> None:
+    """Даже первый шаг не может вернуть источники без вызова поиска."""
+    provider = ScriptedProvider([cited_final("KB-SERVER-START")])
+    executor, calls = executor_calls()
+    with pytest.raises(AgentInvalidCitationError):
+        AgentRuntime(provider, executor).run(CONTEXT)
+    assert calls == []
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,7 @@ CONTENT = {
     "summary": "Сбой запуска",
     "category": "other",
     "draft_reply": "Уточните версию.",
+    "sources": [],
 }
 FAKE_KEY = "test-placeholder-never-a-real-key"
 ENV_FIELDS = (
@@ -182,12 +183,20 @@ def test_real_sdk_multiturn_replays_reasoning_batch_and_outputs() -> None:
         assert body["max_output_tokens"] == 700
         assert body["text"]["format"]["strict"] is True
         assert body["text"]["format"]["schema"]["additionalProperties"] is False
+        # Strict-схема требует все поля, включая список источников.
+        assert set(body["text"]["format"]["schema"]["required"]) == {
+            "summary",
+            "category",
+            "draft_reply",
+            "sources",
+        }
         assert "previous_response_id" not in body
         assert {tool["name"] for tool in body["tools"]} == {
             "get_ticket",
             "get_customer",
             "get_license",
             "get_ticket_history",
+            "search_knowledge",
         }
         assert all(tool["strict"] is True for tool in body["tools"])
     replay = bodies[1]["input"]

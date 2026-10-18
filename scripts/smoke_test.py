@@ -26,7 +26,12 @@ EXPECTED_AGENT_TOOLS = [
     "get_customer",
     "get_ticket_history",
     "get_license",
+    "search_knowledge",
 ]
+# Известный запрос к учебной базе знаний и статья, которая должна быть первой.
+KNOWLEDGE_QUERY = "Сервер не запускается после обновления"
+KNOWLEDGE_PRODUCT = "techflow-server"
+KNOWLEDGE_TOP_DOCUMENT = "KB-SERVER-START"
 DRAFT_CATEGORIES = {"technical_issue", "license_question", "how_to", "other"}
 MOCK_NOTE = "Реальная модель не вызывалась."
 
@@ -232,13 +237,8 @@ def has_operation(paths: dict, prefix: str, suffix: str, method: str) -> bool:
     )
 
 
-def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
-    """Проверить mock-черновик; сначала запретить платный режим, затем писать.
-
-    Флаг создаёт три вымышленные записи (клиент, продукт, обращение). Сам
-    маршрут черновика не должен их менять; это проверяем отдельным GET.
-    В CI записи и том принадлежат одноразовому Compose-проекту.
-    """
+def require_mock_llm(url: str, paths: dict, deadline: float) -> None:
+    """До любого POST убедиться, что настроен mock и платный провайдер исключён."""
     status_path = paths.get("/api/llm/status")
     if not isinstance(status_path, dict) or not isinstance(
         status_path.get("get"), dict
@@ -257,6 +257,15 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
             "--check-llm разрешён только для настроенного mock; POST не выполнялись"
         )
     print("OK /api/llm/status: mock настроен; платный провайдер исключён")
+
+
+def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
+    """Проверить mock-черновик после require_mock_llm и вернуть учебные записи.
+
+    Флаг создаёт три вымышленные записи (клиент, продукт, обращение). Сам
+    маршрут черновика не должен их менять; это проверяем отдельным GET.
+    В CI записи и том принадлежат одноразовому Compose-проекту.
+    """
     suffix = uuid4().hex[:12]
     customer = create_smoke_record(
         url,
@@ -283,7 +292,8 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
             "customer_id": customer["id"],
             "product_id": product["id"],
             "subject": "Учебная проверка черновика",
-            "description": "Нужны подробности ошибки",
+            # Текст совпадает с общей статьёй: агент должен найти и процитировать её.
+            "description": "Какие сведения приложить к обращению об ошибке?",
         },
         deadline,
     )
@@ -318,8 +328,93 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
     return {"customer": customer, "product": product, "ticket": ticket}
 
 
+def check_knowledge(url: str, paths: dict, deadline: float) -> None:
+    """Проверить индекс и поиск по базе знаний; режим только читает данные.
+
+    Сначала статус должен подтвердить mock-эмбеддинги и готовый индекс:
+    поиск с платными эмбеддингами smoke-тест не выполняет.
+    """
+    for path, method in (
+        ("/api/knowledge/status", "get"),
+        ("/api/knowledge/search", "post"),
+    ):
+        operations = paths.get(path)
+        if not isinstance(operations, dict) or not isinstance(
+            operations.get(method), dict
+        ):
+            raise SmokeTestError(
+                f"/openapi.json: отсутствует операция {method.upper()} {path}"
+            )
+    status = json_object(
+        fetch(f"{url}/api/knowledge/status", deadline), "/api/knowledge/status"
+    )
+    if (
+        status.get("embedding_provider") != "mock"
+        or status.get("configured") is not True
+    ):
+        raise SmokeTestError(
+            "--check-knowledge разрешён только для настроенных mock-эмбеддингов; "
+            "поиск не выполнялся"
+        )
+    documents, points = status.get("documents"), status.get("points")
+    if (
+        status.get("index") != "ready"
+        or type(documents) is not int
+        or type(points) is not int
+        or documents < 1
+        or points < documents
+    ):
+        raise SmokeTestError(
+            "/api/knowledge/status: индекс не готов; выполните "
+            "python -m app.knowledge.ingest"
+        )
+    print(f"OK /api/knowledge/status: индекс готов, статей {documents}, точек {points}")
+    endpoint = "/api/knowledge/search"
+    found = json_object(
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={
+                "query": KNOWLEDGE_QUERY,
+                "product_code": KNOWLEDGE_PRODUCT,
+                "limit": 3,
+            },
+        ),
+        endpoint,
+    )
+    results = found.get("results")
+    if (
+        not isinstance(results, list)
+        or not results
+        or not all(isinstance(item, dict) for item in results)
+        or results[0].get("document_key") != KNOWLEDGE_TOP_DOCUMENT
+        or not isinstance(results[0].get("source_path"), str)
+        or any(
+            item.get("scope") not in {KNOWLEDGE_PRODUCT, "general"} for item in results
+        )
+    ):
+        raise SmokeTestError(f"{endpoint}: известная статья не найдена первой")
+    print(f"OK {endpoint}: первая статья {KNOWLEDGE_TOP_DOCUMENT} с источником")
+    other = json_object(
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={"query": KNOWLEDGE_QUERY, "product_code": "techflow-desktop"},
+        ),
+        endpoint,
+    )
+    if not isinstance(other.get("results"), list) or any(
+        not isinstance(item, dict) or item.get("scope") == KNOWLEDGE_PRODUCT
+        for item in other["results"]
+    ):
+        raise SmokeTestError(f"{endpoint}: статья другого продукта попала в выдачу")
+    print(f"OK {endpoint}: фильтр продукта не показывает чужие статьи")
+
+
 def valid_agent_run(run: dict, ticket_id: int) -> bool:
-    """Проверить сохранённый mock-запуск: четыре инструмента и pending-черновик."""
+    """Проверить сохранённый mock-запуск: пять инструментов и pending-черновик."""
     trace = run.get("tool_trace")
     result = run.get("result")
     suggestion = run.get("suggestion")
@@ -340,7 +435,8 @@ def valid_agent_run(run: dict, ticket_id: int) -> bool:
             for item in trace
         )
         or not isinstance(result, dict)
-        or set(result) != {"summary", "category", "draft_reply"}
+        or set(result) != {"summary", "category", "draft_reply", "sources"}
+        or not isinstance(result.get("sources"), list)
         or result.get("category") not in DRAFT_CATEGORIES
         or not isinstance(result.get("draft_reply"), str)
         or MOCK_NOTE not in result["draft_reply"]
@@ -351,12 +447,20 @@ def valid_agent_run(run: dict, ticket_id: int) -> bool:
         or suggestion.get("content") != result["draft_reply"]
     ):
         return False
+    calls = {item["name"]: item for item in trace}
     # Ключ в журнале маскируется, а результат проверки берётся из инструмента.
-    license_call = trace[3]
+    license_call = calls["get_license"]
     data = license_call["result"].get("data")
-    return license_call.get("arguments") == {"license_key": "***"} and (
+    if license_call.get("arguments") != {"license_key": "***"} or not (
         isinstance(data, dict) and data.get("valid") is True
-    )
+    ):
+        return False
+    # Источники черновика — только статьи из результата search_knowledge.
+    documents = calls["search_knowledge"]["result"].get("data", {}).get("documents")
+    if not isinstance(documents, list):
+        return False
+    found = {item.get("document_key") for item in documents if isinstance(item, dict)}
+    return bool(result["sources"]) and set(result["sources"]) <= found
 
 
 def check_mock_agent(
@@ -402,7 +506,7 @@ def check_mock_agent(
     run = json_object(body, endpoint)
     if license_key.encode() in body or not valid_agent_run(run, ticket["id"]):
         raise SmokeTestError(f"{endpoint}: неверный контракт сохранённого запуска")
-    print(f"OK {endpoint}: HTTP 201, четыре инструмента, черновик ожидает проверки")
+    print(f"OK {endpoint}: HTTP 201, пять инструментов, черновик ожидает проверки")
     stored_endpoint = f"/api/agent-runs/{run['id']}"
     stored = json_object(fetch(f"{url}{stored_endpoint}", deadline), stored_endpoint)
     if stored != run:
@@ -423,12 +527,15 @@ def run_checks(
     check_api: bool = False,
     check_llm: bool = False,
     check_agent: bool = False,
+    check_knowledge_base: bool = False,
 ) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
-    # Агент использует учебные записи и проверку mock из --check-llm.
+    # Агент использует учебные записи и проверку mock из --check-llm,
+    # а его поиск имеет смысл только при готовом индексе базы знаний.
     check_llm = check_llm or check_agent
+    check_knowledge_base = check_knowledge_base or check_agent
     # Предметное API требует БД, поэтому --check-api включает и /ready.
-    check_api = check_api or check_llm
+    check_api = check_api or check_llm or check_knowledge_base
     check_database = check_database or check_api
     deadline = time.monotonic() + timeout
     while True:
@@ -490,6 +597,11 @@ def run_checks(
 
     if check_api:
         check_business_api(url, paths, deadline)
+    # Все проверки режима (mock LLM, mock-эмбеддинги) выполняются до записей.
+    if check_llm:
+        require_mock_llm(url, paths, deadline)
+    if check_knowledge_base:
+        check_knowledge(url, paths, deadline)
     if check_llm:
         records = check_mock_llm(url, paths, deadline)
         if check_agent:
@@ -530,11 +642,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--check-knowledge",
+        action="store_true",
+        help=(
+            "только mock-эмбеддинги: проверить индекс и поиск по базе знаний "
+            "без записи; включает --check-api"
+        ),
+    )
+    parser.add_argument(
         "--check-agent",
         action="store_true",
         help=(
             "только mock: дополнительно создать лицензию и сохранённый запуск "
-            "агента; включает --check-llm"
+            "агента; включает --check-llm и --check-knowledge"
         ),
     )
     args = parser.parse_args()
@@ -546,6 +666,7 @@ def main() -> int:
             check_api=args.check_api,
             check_llm=args.check_llm,
             check_agent=args.check_agent,
+            check_knowledge_base=args.check_knowledge,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

@@ -16,15 +16,57 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
 
 
+KNOWLEDGE_STATUS = {
+    "configured": True,
+    "embedding_provider": "mock",
+    "embedding_model": "mock-hash-v1",
+    "dimensions": 256,
+    "collection": "support_knowledge",
+    "index": "ready",
+    "points": 27,
+    "documents": 7,
+}
+
+
+def hit(key: str, scope: str) -> dict:
+    """Описать найденный фрагмент так, как его возвращает API поиска."""
+    return {
+        "document_key": key,
+        "title": "Статья",
+        "section": "Раздел",
+        "text": "Текст",
+        "score": 0.5,
+        "source_path": f"knowledge/{key.lower()}.md",
+        "scope": scope,
+    }
+
+
+def knowledge_search(body: dict) -> tuple[int, bytes]:
+    """Ответить на поиск по телу запроса: фильтр продукта меняет выдачу."""
+    if body.get("product_code") == "techflow-server":
+        results = [hit("KB-SERVER-START", "techflow-server")]
+    else:
+        results = [hit("KB-SUPPORT-DATA", "general")]
+    return 200, json.dumps(
+        {
+            "query": body.get("query"),
+            "embedding_signature": "mock:mock-hash-v1:256",
+            "results": results,
+        }
+    ).encode()
+
+
 def valid_responses(
     check_database: bool = False,
     check_api: bool = False,
     check_llm: bool = False,
     check_agent: bool = False,
-) -> dict[str, tuple[int, bytes]]:
+    check_knowledge: bool = False,
+) -> dict:
     """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
     check_llm = check_llm or check_agent
-    check_api = check_api or check_llm
+    check_knowledge = check_knowledge or check_agent
+    check_api = check_api or check_llm or check_knowledge
     check_database = check_database or check_api
     paths = {"/health": {"get": {}}}
     if check_api:
@@ -34,6 +76,9 @@ def valid_responses(
     if check_llm:
         paths["/api/llm/status"] = {"get": {}}
         paths["/api/tickets/{resource_id}/draft"] = {"post": {}}
+    if check_knowledge:
+        paths["/api/knowledge/status"] = {"get": {}}
+        paths["/api/knowledge/search"] = {"post": {}}
     if check_agent:
         paths["/api/tickets/{resource_id}/analyze"] = {"post": {}}
         paths["/api/agent-runs/{resource_id}"] = {"get": {}}
@@ -93,6 +138,12 @@ def valid_responses(
                 ),
             }
         )
+    if check_knowledge:
+        responses["/api/knowledge/status"] = (
+            200,
+            json.dumps(KNOWLEDGE_STATUS).encode(),
+        )
+        responses["/api/knowledge/search"] = knowledge_search
     if check_agent:
         run = json.dumps(agent_run()).encode()
         responses.update(
@@ -137,12 +188,18 @@ def agent_run() -> dict:
                 {"tickets": [], "limit": 5},
             ),
             call("get_license", {"license_key": "***"}, {"valid": True}),
+            call(
+                "search_knowledge",
+                {"query": "Учебная проверка", "limit": 3},
+                {"documents": [hit("KB-SUPPORT-DATA", "general")]},
+            ),
         ],
         "usage": None,
         "result": {
             "summary": "Обращение №13",
             "category": "license_question",
             "draft_reply": reply,
+            "sources": ["KB-SUPPORT-DATA"],
         },
         "suggestion": {
             "id": 31,
@@ -161,19 +218,24 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
     class Handler(BaseHTTPRequestHandler):
         """Выдать ответы сценария и посчитать реальные HTTP-запросы."""
 
-        def do_GET(self) -> None:
-            """Обработать GET так же, как внешний сервис для smoke CLI."""
+        def respond(self, payload: dict | None = None) -> None:
+            """Выдать ответ сценария; функция-ответ получает JSON тела POST."""
             requests[self.path] += 1
-            status, body = responses.get(self.path, (404, b"Not found"))
+            value = responses.get(self.path, (404, b"Not found"))
+            status, body = value(payload or {}) if callable(value) else value
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self) -> None:
+            """Обработать GET так же, как внешний сервис для smoke CLI."""
+            self.respond()
+
         def do_POST(self) -> None:
             """Принять тело POST и выдать отдельный ответ сценария без реальной БД."""
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.do_GET()
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.respond(json.loads(raw) if raw else None)
 
         def log_message(self, format: str, *args) -> None:
             """Не засорять вывод Pytest служебными логами фиктивного сервера."""
@@ -197,6 +259,7 @@ def run_smoke(
     check_api: bool = False,
     check_llm: bool = False,
     check_agent: bool = False,
+    check_knowledge: bool = False,
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
@@ -208,6 +271,8 @@ def run_smoke(
         command.append("--check-llm")
     if check_agent:
         command.append("--check-agent")
+    if check_knowledge:
+        command.append("--check-knowledge")
     return subprocess.run(
         command,
         capture_output=True,
@@ -478,11 +543,13 @@ def test_cli_checks_saved_agent_run_and_unchanged_ticket() -> None:
     with http_server(responses) as (url, requests):
         result = run_smoke(url, check_agent=True)
     assert result.returncode == 0, result.stderr
-    # Обращение читается дважды: после черновика и после анализа агентом.
+    # Обращение читается дважды: после черновика и после анализа агентом;
+    # поиск — дважды: для продукта и для проверки фильтра другого продукта.
     expected = Counter({endpoint: 1 for endpoint in responses})
     expected["/api/tickets/13"] = 2
+    expected["/api/knowledge/search"] = 2
     assert requests == expected
-    assert "четыре инструмента" in result.stdout
+    assert "пять инструментов" in result.stdout
     assert "Smoke test пройден" in result.stdout
 
 
@@ -499,6 +566,8 @@ def test_cli_refuses_agent_mode_before_any_post_for_real_provider() -> None:
     assert "POST не выполнялись" in result.stderr
     assert requests["/api/licenses"] == 0
     assert requests["/api/tickets/13/analyze"] == 0
+    # Проверка режима LLM идёт раньше любого POST, включая поиск.
+    assert requests["/api/knowledge/search"] == 0
 
 
 @pytest.mark.parametrize("missing", ["analyze", "agent-runs"])
@@ -531,6 +600,9 @@ def test_cli_requires_agent_operations_before_writing_license(missing: str) -> N
         {"suggestion": None},
         {"suggestion": {"id": 31, "content": "x", "status": "approved"}},
         "drop_license_call",
+        "drop_search_call",
+        "unknown_source",
+        "no_sources",
         "raw_license_key",
         "license_invalid",
         "tool_error",
@@ -543,7 +615,13 @@ def test_cli_rejects_wrong_agent_run(change) -> None:
     if isinstance(change, dict):
         run |= change
     elif change == "drop_license_call":
+        run["tool_trace"].pop(3)
+    elif change == "drop_search_call":
         run["tool_trace"].pop()
+    elif change == "unknown_source":
+        run["result"]["sources"] = ["KB-PASSWORD-RESET"]
+    elif change == "no_sources":
+        run["result"]["sources"] = []
     elif change == "raw_license_key":
         run["tool_trace"][3]["arguments"] = {"license_key": "SMOKE-LEAKED"}
     elif change == "license_invalid":
@@ -571,3 +649,80 @@ def test_cli_rejects_saved_run_that_differs_from_post() -> None:
         result = run_smoke(url, check_agent=True)
     assert result.returncode == 1
     assert "сохранённый запуск отличается" in result.stderr
+
+
+def test_cli_checks_knowledge_index_and_product_filter() -> None:
+    """--check-knowledge только читает: статус, поиск и изоляция продуктов."""
+    responses = valid_responses(check_knowledge=True)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_knowledge=True)
+    assert result.returncode == 0, result.stderr
+    assert requests["/api/knowledge/status"] == 1
+    assert requests["/api/knowledge/search"] == 2
+    assert requests["/api/customers"] == 0
+    assert "KB-SERVER-START" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"embedding_provider": "openai"},
+        {"configured": False},
+    ],
+)
+def test_cli_refuses_knowledge_search_without_mock_embeddings(changes: dict) -> None:
+    """Поиск с платными или ненастроенными эмбеддингами не выполняется."""
+    responses = valid_responses(check_knowledge=True)
+    responses["/api/knowledge/status"] = (
+        200,
+        json.dumps(KNOWLEDGE_STATUS | changes).encode(),
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_knowledge=True)
+    assert result.returncode == 1
+    assert "поиск не выполнялся" in result.stderr
+    assert requests["/api/knowledge/search"] == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"index": "missing", "points": None},
+        {"documents": 0},
+        {"points": 3},
+    ],
+)
+def test_cli_requires_ready_index(changes: dict) -> None:
+    """Пустой или неполный индекс просит выполнить индексацию."""
+    responses = valid_responses(check_knowledge=True)
+    responses["/api/knowledge/status"] = (
+        200,
+        json.dumps(KNOWLEDGE_STATUS | changes).encode(),
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_knowledge=True)
+    assert result.returncode == 1
+    assert "app.knowledge.ingest" in result.stderr
+    assert requests["/api/knowledge/search"] == 0
+
+
+def test_cli_rejects_wrong_top_article() -> None:
+    """Известный запрос должен находить известную статью первой."""
+    responses = valid_responses(check_knowledge=True)
+    responses["/api/knowledge/search"] = lambda body: knowledge_search({})
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_knowledge=True)
+    assert result.returncode == 1
+    assert "не найдена первой" in result.stderr
+
+
+def test_cli_rejects_other_product_leak() -> None:
+    """Статья сервера в выдаче для другого продукта блокирует выпуск."""
+    responses = valid_responses(check_knowledge=True)
+    responses["/api/knowledge/search"] = lambda body: knowledge_search(
+        {"product_code": "techflow-server"}
+    )
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_knowledge=True)
+    assert result.returncode == 1
+    assert "другого продукта" in result.stderr

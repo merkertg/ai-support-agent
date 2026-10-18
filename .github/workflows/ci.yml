@@ -44,13 +44,23 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
+      # Отдельный Qdrant runner: тесты создают и удаляют только коллекции test_*.
+      # Готовность проверяет шаг ниже: в образе Qdrant нет curl для health-cmd.
+      qdrant:
+        image: qdrant/qdrant:v1.19.1
+        env:
+          QDRANT__TELEMETRY_DISABLED: "true"
+        ports:
+          - 6333:6333
     env:
       DATABASE_URL: postgresql+psycopg://support:support_ci@127.0.0.1:5432/ai_support_test
       TEST_DATABASE_URL: postgresql+psycopg://support:support_ci@127.0.0.1:5432/ai_support_test
-      # CI никогда не выполняет платные запросы к модели.
+      TEST_QDRANT_URL: http://127.0.0.1:6333
+      # CI никогда не выполняет платные запросы к модели и эмбеддингам.
       LLM_PROVIDER: mock
       OPENAI_API_KEY: ""
       OPENAI_MODEL: ""
+      EMBEDDING_PROVIDER: mock
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,6 +82,17 @@ jobs:
       - name: Install locked dependencies
         id: dependencies
         run: uv sync --locked
+
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:6333/readyz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant не стал готов за 60 секунд" >&2
+          exit 1
 
       # Проверяем реальный путь создания БД и совпадение схемы с моделями.
       # Ошибка миграции блокирует container и дальнейшую публикацию образа.
@@ -120,6 +141,8 @@ jobs:
       LLM_PROVIDER: mock
       OPENAI_API_KEY: ""
       OPENAI_MODEL: ""
+      EMBEDDING_PROVIDER: mock
+      OPENAI_EMBEDDING_MODEL: ""
       POSTGRES_USER: support
       POSTGRES_PASSWORD: container_ci
       POSTGRES_DB: ai_support
@@ -146,9 +169,16 @@ jobs:
           docker compose --project-name ai-support-ci up \
             --detach --no-build --wait --wait-timeout 90 api
 
-      # --check-agent включает БД, API, mock-черновик и сохранённый запуск агента.
+      # Явная индексация статей из образа: PostgreSQL-реестр и векторы в Qdrant.
+      - name: Index knowledge base
+        run: |
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.knowledge.ingest | tee ingest.json
+          python3 -c 'import json; r = json.load(open("ingest.json")); assert r["documents"] >= 1 and r["indexed"] and not r["removed"]'
+
+      # --check-agent включает БД, API, базу знаний, mock-черновик и запуск агента.
       # Журнал нужен следующему шагу: из него берётся ID созданного запуска.
-      - name: Check HTTP endpoints, database readiness and agent run
+      - name: Check HTTP endpoints, knowledge search and agent run
         run: |
           python3 scripts/smoke_test.py \
             --base-url http://127.0.0.1:8000 --timeout 30 --check-agent | tee smoke.log
@@ -163,6 +193,10 @@ jobs:
           run_path="$(grep -o -m 1 '/api/agent-runs/[0-9]*' smoke.log)"
           test -n "$run_path"
           curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-before.json
+          # Индекс Qdrant хранится в томе и тоже должен пережить пересоздание.
+          search='{"query":"Сервер не запускается после обновления","product_code":"techflow-server"}'
+          curl --fail --silent --show-error -H 'Content-Type: application/json' \
+            -d "$search" http://127.0.0.1:8000/api/knowledge/search > knowledge-before.json
           # down без --volumes сохраняет named volume, но удаляет контейнеры.
           docker compose --project-name ai-support-ci down
           docker compose --project-name ai-support-ci up \
@@ -172,6 +206,14 @@ jobs:
           cmp before.json after.json
           curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-after.json
           cmp run-before.json run-after.json
+          curl --fail --silent --show-error -H 'Content-Type: application/json' \
+            -d "$search" http://127.0.0.1:8000/api/knowledge/search > knowledge-after.json
+          cmp knowledge-before.json knowledge-after.json
+          # Повторная индексация после пересоздания ничего не переписывает.
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.knowledge.ingest > ingest-again.json
+          python3 -c 'import json; r = json.load(open("ingest-again.json")); assert r["indexed"] == [] and r["removed"] == [] and r["unchanged"]'
+
           python3 scripts/smoke_test.py \
             --base-url http://127.0.0.1:8000 --timeout 30 --check-agent
 

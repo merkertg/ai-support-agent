@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Protocol
 
-from app.schemas.drafts import DraftContent, TokenUsage
+from app.schemas.drafts import AgentDraftContent, TokenUsage
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ class AgentTurn:
 
     output_items: list[dict]
     calls: list[AgentToolCall]
-    final: DraftContent | None
+    final: AgentDraftContent | None
     model: str
     usage: TokenUsage | None = None
 
@@ -67,7 +67,7 @@ class AgentTurn:
 class AgentOutcome:
     """Передать черновик сервису, который отдельно сохраняет его в БД."""
 
-    final: DraftContent
+    final: AgentDraftContent
     model: str
     provider: Literal["mock", "openai"]
     progress: AgentProgress

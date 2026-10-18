@@ -95,8 +95,9 @@ Trace не является записью внутренних рассужде
 
 ## 3. Инструменты и область доступных данных
 
-Разрешены ровно четыре функции. Имена и JSON Schema задаёт приложение;
-неизвестное имя не становится новой возможностью сервера.
+На этапе 05 разрешены ровно четыре функции. Имена и JSON Schema задаёт приложение;
+неизвестное имя не становится новой возможностью сервера. Этап 06 добавляет
+пятую — `search_knowledge` для поиска по базе знаний, см. [STAGE_06.md](STAGE_06.md).
 
 | Имя | Аргументы | Что читает и проверяет |
 | --- | --- | --- |
@@ -510,11 +511,11 @@ assert run["suggestion"]["status"] == "pending"
 assert run["suggestion"]["requires_human_review"] is True
 assert run["suggestion"]["content"] == run["result"]["draft_reply"]
 assert "Демонстрационный агент. Реальная модель не вызывалась." in run["result"]["draft_reply"]
-names = [item["name"] for item in run["tool_trace"]]
-assert sorted(names) == sorted([
-    "get_ticket", "get_customer", "get_ticket_history", "get_license",
-])
-assert all(item["result"]["ok"] is True for item in run["tool_trace"])
+calls = {item["name"]: item for item in run["tool_trace"]}
+stage05 = ["get_ticket", "get_customer", "get_ticket_history", "get_license"]
+# С этапа 06 есть ещё search_knowledge; до индексации он возвращает ошибку.
+assert set(stage05) <= set(calls) <= set(stage05) | {"search_knowledge"}
+assert all(calls[name]["result"]["ok"] is True for name in stage05)
 assert sys.argv[3] not in json.dumps(run, ensure_ascii=False)
 print(run["id"])
 PY
@@ -522,8 +523,8 @@ PY
 ```
 
 Три шага mock: сначала `get_ticket`, затем пакет `get_customer`,
-`get_ticket_history` и `get_license` при переданной подсказке, затем финальный
-черновик. Вариант без подсказки выполняет три инструмента за те же три шага.
+`get_ticket_history` и `get_license` при переданной подсказке (с этапа 06 —
+ещё и `search_knowledge`), затем финальный черновик. Вариант без подсказки выполняет три инструмента за те же три шага.
 Порядок элементов внутри второго пакета проверяется контрактом кода;
 в учебной проверке выше сравнивается набор имён, чтобы не путать порядок
 JSON-массива с бизнес-смыслом.

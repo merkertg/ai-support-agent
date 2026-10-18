@@ -1,7 +1,8 @@
 """Разрешённые инструменты агента: только чтение данных текущего обращения.
 
 Имя функции и JSON от модели никогда не превращаются в Python-код или SQL.
-Реестр задаёт четыре функции, строгие аргументы и серверную область доступа.
+Реестр задаёт пять функций, строгие аргументы и серверную область доступа:
+четыре читают PostgreSQL, search_knowledge ищет статьи базы знаний в Qdrant.
 """
 
 import json
@@ -14,12 +15,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.agent.contracts import AgentContext
+from app.knowledge.documents import GENERAL_SCOPE
+from app.knowledge.errors import KnowledgeError
+from app.knowledge.index import IndexFactory
 from app.llm.errors import LLMError
 from app.models import Customer, License, Product, Ticket
+from app.schemas.knowledge import SearchQuery
 from app.schemas.resources import StrictPositiveId
 
 MAX_ARGUMENT_CHARACTERS = 4096
 MAX_TOOL_RESULT_CHARACTERS = 16_000
+# Фрагмент статьи для модели короче полного: пять источников помещаются в лимит.
+MAX_SOURCE_CHARACTERS = 800
 
 
 class ToolArguments(BaseModel):
@@ -54,17 +61,29 @@ class HistoryArguments(CustomerArguments):
     limit: int = Field(ge=1, le=5, strict=True)
 
 
+class SearchArguments(ToolArguments):
+    """Принять текст поиска; продукт для фильтра сервер берёт из обращения."""
+
+    query: SearchQuery
+    limit: int = Field(ge=1, le=5, strict=True)
+
+
 ARGUMENT_SCHEMAS = {
     "get_ticket": TicketArguments,
     "get_customer": CustomerArguments,
     "get_license": LicenseArguments,
     "get_ticket_history": HistoryArguments,
+    "search_knowledge": SearchArguments,
 }
 TOOL_DESCRIPTIONS = {
     "get_ticket": "Прочитать текущее обращение и его продукт по ticket_id.",
     "get_customer": "Прочитать имя и компанию клиента текущего обращения без email.",
     "get_license": "Проверить указанный ключ только для клиента и продукта обращения.",
     "get_ticket_history": "Прочитать до пяти прежних обращений клиента по продукту.",
+    "search_knowledge": (
+        "Найти до пяти статей базы знаний для продукта обращения и общих статей. "
+        "В sources черновика можно указывать только document_key из результата."
+    ),
 }
 # В strict-схемах все параметры обязательны, additionalProperties запрещены.
 TOOL_DEFINITIONS = [
@@ -114,11 +133,17 @@ class SQLToolExecutor:
         context: AgentContext,
         *,
         checked_at: datetime | None = None,
+        knowledge: IndexFactory | None = None,
     ) -> None:
-        """Зафиксировать доверенную область и момент проверки срока лицензии."""
+        """Зафиксировать доверенную область и момент проверки срока лицензии.
+
+        knowledge открывает индекс базы знаний только для search_knowledge;
+        без фабрики поиск возвращает модели ошибку инструмента.
+        """
         self.engine = engine
         self.context = context
         self.checked_at = checked_at or datetime.now(UTC)
+        self.knowledge = knowledge
 
     def __call__(self, name: str, arguments: str) -> tuple[dict, dict]:
         """Проверить имя/JSON/типы/область прежде запроса к PostgreSQL.
@@ -173,7 +198,16 @@ class SQLToolExecutor:
                         "stale_scope", "Область обращения изменилась."
                     )
                 # Диспетчер закрыт: нет getattr, eval или имён таблиц от модели.
-                if name == "get_ticket":
+                if name == "search_knowledge":
+                    product = session.get(Product, self.context.product_id)
+                    if product is None:
+                        return trace_arguments, tool_error(
+                            "not_found", "Продукт обращения не найден."
+                        )
+                    # Код копируем: поиск в Qdrant идёт уже после закрытия сессии.
+                    product_code = product.code
+                    result = None
+                elif name == "get_ticket":
                     result = self._ticket(session, ticket)
                 elif name == "get_customer":
                     result = self._customer(session)
@@ -183,12 +217,54 @@ class SQLToolExecutor:
                     result = self._history(session, safe_arguments["limit"])
         except SQLAlchemyError:
             raise ToolDataUnavailable() from None
+        if name == "search_knowledge":
+            # SQL-соединение уже возвращено в пул до запроса эмбеддингов и Qdrant.
+            result = self._search(
+                safe_arguments["query"], product_code, safe_arguments["limit"]
+            )
         # Результат уже состоит из обычных JSON-значений; ORM остаётся в сессии.
         if len(json.dumps(result, ensure_ascii=False)) > MAX_TOOL_RESULT_CHARACTERS:
             return trace_arguments, tool_error(
                 "result_too_large", "Результат инструмента слишком большой."
             )
         return trace_arguments, result
+
+    def _search(self, query: str, product_code: str, limit: int) -> dict:
+        """Найти статьи продукта обращения и общие; сбой поиска — ошибка инструмента.
+
+        Недоступная база знаний не прерывает анализ: модель узнаёт об ошибке
+        и обязана ответить без ссылок на источники.
+        """
+        if self.knowledge is None:
+            return tool_error("knowledge_unavailable", "База знаний не настроена.")
+        try:
+            with self.knowledge() as index:
+                hits = index.search(
+                    query, [product_code, GENERAL_SCOPE], limit, per_document=True
+                )
+                signature = index.embedder.signature
+        except KnowledgeError:
+            return tool_error(
+                "knowledge_unavailable", "База знаний временно недоступна."
+            )
+        return {
+            "ok": True,
+            "data": {
+                "documents": [
+                    {
+                        "document_key": hit.document_key,
+                        "title": hit.title,
+                        "section": hit.section,
+                        "text": hit.text[:MAX_SOURCE_CHARACTERS],
+                        "score": hit.score,
+                        "source_path": hit.source_path,
+                    }
+                    for hit in hits
+                ],
+                "scope": [product_code, GENERAL_SCOPE],
+                "embedding_signature": signature,
+            },
+        }
 
     def _ticket(self, session: Session, ticket: Ticket) -> dict:
         """Выдать текст текущего обращения и ограниченные сведения о продукте."""

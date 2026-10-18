@@ -1,4 +1,4 @@
-# Локальный стенд этапов 02–05. Настройки берутся из .env, образ — из Dockerfile.
+# Локальный стенд этапов 02–06. Настройки берутся из .env, образ — из Dockerfile.
 name: ai-support-agent
 
 # Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
@@ -29,6 +29,25 @@ services:
       retries: 30
       start_period: 5s
 
+  # Векторная БД этапа 06: фрагменты статей базы знаний и их эмбеддинги.
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    environment:
+      # Учебный стенд не отправляет анонимную телеметрию Qdrant.
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6335}:6333"
+    volumes:
+      # Как и PostgreSQL, индекс переживает обычный down без --volumes.
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # В образе нет curl: bash отправляет HTTP-запрос к /readyz через /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
   migrate:
     <<: *application
     command: ["python", "-m", "alembic", "upgrade", "head"]
@@ -53,6 +72,13 @@ services:
       AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-6}
       AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-12}
       AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-60}
+      QDRANT_URL: ${QDRANT_URL_DOCKER:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-support_knowledge}
+      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-5}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
+      KNOWLEDGE_MIN_SCORE: ${KNOWLEDGE_MIN_SCORE:-0.2}
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:
@@ -60,6 +86,9 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # /ready проверяет только PostgreSQL; Qdrant нужен поиску и агенту.
+      qdrant:
+        condition: service_healthy
     # В Dockerfile /ready проверяет соединение с БД и актуальность миграции.
     healthcheck:
       interval: 3s
@@ -87,5 +116,23 @@ services:
       retries: 30
       start_period: 5s
 
+  # Отдельный одноразовый Qdrant для integration tests; индекс хранится в памяти.
+  qdrant-test:
+    profiles: [test]
+    image: qdrant/qdrant:v1.19.1
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:${QDRANT_TEST_PORT:-6336}:6333"
+    tmpfs:
+      - /qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
 volumes:
   postgres_data:
+  qdrant_data:
