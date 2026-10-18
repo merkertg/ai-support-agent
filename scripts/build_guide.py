@@ -565,9 +565,9 @@ def cover_page(c, doc):
         W,
         74,
         [
-            ("7 / 10", "этапов дорожной карты готово"),
+            ("10 / 10", "этапов дорожной карты готово"),
             (str(doc.verification["tests"]["total"]), "автоматических тестов"),
-            ("22 / 27", "пути / операции HTTP API"),
+            ("25 / 31", "пути / операции HTTP API"),
             ("5", "инструментов агента"),
             ("4", "миграции базы данных"),
         ],
@@ -592,19 +592,21 @@ def cover_page(c, doc):
         "8  Шпаргалка API",
         "9  Как запустить",
         "10  Проверки и CI/CD",
-        "11  Дорожная карта",
-        "12  Словарь",
-        "13  Итоги аудита",
-        "14  Матрица CI",
-        "15  Защита и доставка",
-        "16  Полный прогон",
-        "17  Путь оператора",
-        "18  Перезапуск",
-        "19  Диагностика",
-        "20  Следующие шаги",
+        "11  Интерфейс оператора",
+        "12  Оценки и демонстрация",
+        "13  Дорожная карта",
+        "14  Словарь",
+        "15  Итоги аудита",
+        "16  Матрица CI",
+        "17  Защита и доставка",
+        "18  Полный прогон",
+        "19  Путь оператора",
+        "20  Перезапуск",
+        "21  Диагностика",
+        "22  Следующие шаги",
     ]
     for index, item in enumerate(contents):
-        column, row = divmod(index, 10)
+        column, row = divmod(index, 11)
         c.drawString(MARGIN + column * 250, 282 - row * 15, item)
     c.setStrokeColor(HEX("#334155"))
     c.line(MARGIN, 82, PAGE_W - MARGIN, 82)
@@ -619,7 +621,8 @@ def cover_page(c, doc):
     c.drawString(
         MARGIN,
         53,
-        "Подробные пошаговые инструкции - в docs/STAGE_01-07.md и docs/instructions/",
+        "Подробные пошаговые инструкции - в docs/STAGE_01-10.md, "
+        "docs/DEMO.md и docs/instructions/",
     )
     c.restoreState()
 
@@ -701,7 +704,7 @@ def architecture(c, w, h):
         cw,
         100,
         "Клиенты API",
-        "Swagger UI /docs\ncurl\nsmoke-тест\nбудущий UI",
+        "Swagger UI /docs\ncurl, smoke-тест\nStreamlit UI :8502\ndemo_scenario.py",
         SLATE_L,
         MUTED,
     )
@@ -1495,7 +1498,15 @@ def migrations_timeline(c, w, h):
 
 def tests_chart(c, w, h):
     """Число автотестов по этапам: одна серия, значение на вершине столбца."""
-    data = [("02", 77), ("03", 199), ("04", 289), ("05", 441), ("06", 537), ("07", 597)]
+    data = [
+        ("02", 77),
+        ("03", 199),
+        ("04", 289),
+        ("05", 441),
+        ("06", 537),
+        ("07", 597),
+        ("08-10", 767),
+    ]
     base = 22
     top = h - 16
     chart_h = top - base
@@ -1504,8 +1515,8 @@ def tests_chart(c, w, h):
     slot = chart_w / len(data)
     bar_w = min(24, slot * 0.5)
     c.saveState()
-    for tick in (0, 200, 400, 600):
-        y = base + tick / 600 * chart_h
+    for tick in (0, 200, 400, 600, 800):
+        y = base + tick / 800 * chart_h
         c.setStrokeColor(SLATE_L)
         c.setLineWidth(0.5)
         c.line(left, y, w, y)
@@ -1515,7 +1526,7 @@ def tests_chart(c, w, h):
     c.restoreState()
     for index, (stage, value) in enumerate(data):
         x = left + slot * index + (slot - bar_w) / 2
-        bh = value / 600 * chart_h
+        bh = value / 800 * chart_h
         c.saveState()
         c.setFillColor(SERIES)
         c.roundRect(x, base, bar_w, bh, 3, stroke=0, fill=1)
@@ -1535,14 +1546,14 @@ def ci_pipeline(c, w, h):
         (
             "1. checks + security",
             "lock, Ruff и документы\nмиграции + Pytest\n"
-            "actionlint и pip-audit\nPostgreSQL + Qdrant",
+            "оценки поиска и агента\nactionlint и pip-audit (API + UI)",
             BLUE_L,
             BLUE,
         ),
         (
             "2. Docker + smoke",
-            "сборка образа, Compose\nиндексация статей\n--check-review\n"
-            "пересоздание контейнеров:\nданные, индекс, граф живы",
+            "образы API и UI, Compose\nиндексация, --check-review\n"
+            "пересоздание: данные живы\nUI + демо-сценарий",
             VIOLET_L,
             VIOLET,
         ),
@@ -1562,8 +1573,64 @@ def ci_pipeline(c, w, h):
             arrow(c, x - gap + 3, h / 2, x - 3, h / 2, MUTED, label="успех")
 
 
+def ui_flow(c, w, h):
+    """Интерфейс оператора: браузер → Streamlit → HTTP API → хранилища."""
+    gap = 46
+    bw = (w - gap * 3) / 4
+    # Правый столбец: три хранилища сверху вниз в пределах высоты схемы.
+    sh, sgap = 40, 6
+    stores_top = h - 2
+    stores_bottom = stores_top - 3 * sh - 2 * sgap
+    bh = 74
+    y = (stores_top + stores_bottom) / 2 - bh / 2
+    steps = [
+        ("Браузер", "оператор работает\nс формами", ORANGE_L, ORANGE),
+        ("Streamlit", "operator_ui/\nотдельный образ UI", VIOLET_L, VIOLET),
+        ("FastAPI", "/api/* - проверки\nи транзакции", BLUE_L, BLUE),
+    ]
+    for index, (title, sub, fill, edge) in enumerate(steps):
+        x = index * (bw + gap)
+        node(c, x, y, bw, bh, title, sub, fill, edge, ssize=7.8)
+        if index:
+            label = "страница" if index == 1 else "HTTP JSON"
+            arrow(c, x - gap + 3, y + bh / 2, x - 3, y + bh / 2, MUTED, label=label)
+    stores = [
+        ("PostgreSQL", "данные и checkpoint", TEAL_L, TEAL),
+        ("Qdrant", "статьи базы знаний", TEAL_L, TEAL),
+        ("mock / OpenAI", "черновик и анализ", GREEN_L, GREEN),
+    ]
+    x = 3 * (bw + gap)
+    for index, (title, sub, fill, edge) in enumerate(stores):
+        sy = stores_top - (index + 1) * sh - index * sgap
+        node(c, x, sy, bw, sh, title, sub, fill, edge, tsize=9, ssize=7.4)
+        arrow(c, x - gap + 3, y + bh / 2, x - 3, sy + sh / 2, MUTED, lw=1)
+    lines = [
+        "У процесса UI есть только API_URL: ни DATABASE_URL, ни ключа модели.",
+        "Все решения, SQL и вызовы модели остаются на сервере FastAPI.",
+    ]
+    for index, line in enumerate(lines):
+        draw_text(c, 0, stores_bottom - 16 - index * 12, line, "PT", 8.2)
+
+
+def demo_flow(c, w, h):
+    """Демонстрация: скрипт готовит черновик, решение остаётся за человеком."""
+    steps = [
+        ("demo_scenario.py", "проверяет mock и индекс,\nсоздаёт записи", BLUE_L, BLUE),
+        ("pending", "агент подготовил\nчерновик с источниками", AMBER_L, AMBER),
+        ("Сотрудник в UI", "читает, правит,\nодобряет или отклоняет", VIOLET_L, VIOLET),
+        ("delivered", "одно сообщение,\nwaiting_customer", GREEN_L, GREEN),
+    ]
+    gap = 20
+    bw = (w - gap * (len(steps) - 1)) / len(steps)
+    for index, (title, sub, fill, edge) in enumerate(steps):
+        x = index * (bw + gap)
+        node(c, x, 2, bw, h - 4, title, sub, fill, edge, tsize=9.5, ssize=7.6)
+        if index:
+            arrow(c, x - gap + 3, h / 2, x - 3, h / 2, MUTED)
+
+
 def roadmap(c, w, h):
-    """Десять этапов: семь готовы, три впереди."""
+    """Десять этапов учебного проекта: все готовы."""
     stages = [
         ("01", "FastAPI, /health, первые тесты", "основа API, uv, Ruff, Pytest", True),
         (
@@ -1592,14 +1659,24 @@ def roadmap(c, w, h):
             "одобрение, доставка, checkpoint в БД",
             True,
         ),
-        ("08", "Интерфейс оператора", "Streamlit поверх готового API", False),
+        (
+            "08",
+            "Интерфейс оператора",
+            "Streamlit поверх API, очередь проверки, отдельный образ",
+            True,
+        ),
         (
             "09",
             "Оценки качества и безопасность",
-            "наборы вопросов, проверки агента",
-            False,
+            "32 вопроса поиска, 12 сценариев агента, пороги в CI",
+            True,
         ),
-        ("10", "Упаковка и демонстрация", "материалы для показа на GitHub", False),
+        (
+            "10",
+            "Упаковка и демонстрация",
+            "Compose с UI, повторяемый демо-сценарий, DEMO.md",
+            True,
+        ),
     ]
     row = h / len(stages)
     for index, (number, title, note, done) in enumerate(stages):
@@ -1785,6 +1862,12 @@ def build_story(verification):
                     p("-", CELL),
                 ],
                 [
+                    p(mono("ui"), CELL),
+                    p("Streamlit; стартует после healthy api", CELL),
+                    p("8502", CELL),
+                    p("-", CELL),
+                ],
+                [
                     p(mono("db-test"), CELL),
                     p("тестовая PostgreSQL (профиль test)", CELL),
                     p("5434", CELL),
@@ -1802,8 +1885,8 @@ def build_story(verification):
         Spacer(1, 10),
         callout(
             "Порядок запуска: <b>db healthy → migrate завершился "
-            "→ qdrant healthy → api "
-            'healthy</b>. Обычный <font name="Mono">docker '
+            "→ qdrant healthy → api healthy "
+            '→ ui healthy</b>. Обычный <font name="Mono">docker '
             "compose down</font> сохраняет "
             "тома: записи, индекс статей и ожидающие решения переживают пересоздание "
             'контейнеров. <font name="Mono">down --volumes</font> удаляет всё.'
@@ -2080,7 +2163,7 @@ def build_story(verification):
         story,
         "8",
         "Шпаргалка API",
-        "22 URL-пути и 27 HTTP-операций. Интерактивная "
+        "25 URL-путей и 31 HTTP-операция. Интерактивная "
         "документация - http://127.0.0.1:8001/docs.",
         BLUE,
     )
@@ -2137,6 +2220,10 @@ def build_story(verification):
         ("", "GET", "/api/suggestions", "Очередь, фильтры status и ticket_id"),
         ("", "GET", "/api/suggestions/{id}", "Предложение и решение по нему"),
         ("", "POST", "/api/suggestions/{id}/review", "Одобрить или отклонить"),
+        ("Оператор", "GET", "/api/dashboard", "Агрегаты всей БД для обзора"),
+        ("", "GET", "/api/agent-runs", "История запусков, фильтр ticket_id"),
+        ("", "GET", "/api/tickets/{id}/messages", "Сообщения обращения"),
+        ("", "PATCH", "/api/tickets/{id}", "Только смена статуса обращения"),
     ]:
         verbs = p(
             " / ".join(
@@ -2208,8 +2295,8 @@ def build_story(verification):
         (
             "2",
             "Запустить стенд",
-            "docker compose up --build --detach --wait api",
-            "Поднимет db, qdrant, применит миграции и запустит API.",
+            "docker compose up --build --detach --wait --wait-timeout 180 ui",
+            "Поднимет db и qdrant, применит миграции, запустит API и UI на :8502.",
         ),
         (
             "3",
@@ -2270,6 +2357,10 @@ def build_story(verification):
                 [
                     p("http://127.0.0.1:8001/docs", CELL_M),
                     p("Swagger UI - все операции", CELL),
+                ],
+                [
+                    p("http://127.0.0.1:8502", CELL_M),
+                    p("Интерфейс оператора Streamlit", CELL),
                 ],
                 [
                     p("http://127.0.0.1:8001/ready", CELL_M),
@@ -2349,12 +2440,178 @@ def build_story(verification):
         ),
     ]
 
-    # 11. Дорожная карта
+    # 11. Интерфейс оператора
     section(
         story,
         "11",
+        "Интерфейс оператора",
+        "Streamlit-панель поверх того же HTTP API: "
+        "обращения, очередь проверки и поиск в браузере.",
+        VIOLET,
+    )
+    story += [
+        Diagram(166, ui_flow),
+        Spacer(1, 10),
+        grid_table(
+            [
+                [p("Раздел", HEAD), p("Что делает оператор", HEAD)],
+                [
+                    p("<b>Обзор</b>", CELL),
+                    p(
+                        "Агрегаты всей БД: обращения, открытые и срочные, "
+                        "время анализа, доля одобрений",
+                        CELL,
+                    ),
+                ],
+                [
+                    p("<b>Обращения</b>", CELL),
+                    p(
+                        "Фильтры, карточка с клиентом и лицензиями, запуск анализа, "
+                        "история запусков и сообщений, смена статуса",
+                        CELL,
+                    ),
+                ],
+                [
+                    p("<b>Очередь проверки</b>", CELL),
+                    p(
+                        "Предложения pending / approved / rejected; правка текста, "
+                        "одобрение или отказ с причиной",
+                        CELL,
+                    ),
+                ],
+                [
+                    p("<b>База знаний</b>", CELL),
+                    p("Поиск фрагментов по запросу и продукту, путь к статье", CELL),
+                ],
+                [
+                    p("<b>Справочники</b>", CELL),
+                    p(
+                        "Клиенты, продукты, лицензии (ключи скрыты) и сотрудники",
+                        CELL,
+                    ),
+                ],
+            ],
+            [120, W - 120],
+        ),
+        Spacer(1, 10),
+        p("Запуск", H2),
+        code_block(
+            "docker compose up --build --detach --wait --wait-timeout 180 ui\n"
+            "docker compose exec -T api python -m app.knowledge.ingest\n"
+            "# интерфейс: http://127.0.0.1:8502"
+        ),
+        Spacer(1, 9),
+        callout(
+            "<b>Изменения - только по явной форме.</b> Перерисовка страницы не "
+            "повторяет анализ и решение; вызов реальной модели требует отдельного "
+            "подтверждения; POST не повторяется автоматически. ID сотрудника в "
+            "боковой панели - учебная отметка автора, а не вход в систему.",
+            VIOLET,
+            VIOLET_L,
+        ),
+    ]
+
+    # 12. Оценки и демонстрация
+    evaluations = verification["evaluations"]
+    section(
+        story,
+        "12",
+        "Оценки и демонстрация",
+        "Числа вместо впечатлений и повторяемый показ без ключа модели.",
+        TEAL,
+    )
+    story += [
+        Diagram(
+            70,
+            lambda c, w, h: stat_tiles(
+                c,
+                0,
+                0,
+                w,
+                h,
+                [
+                    (
+                        f"{evaluations['recall_at_5']:.2f}",
+                        "Recall@5: нужные статьи в первых пяти (порог 0.75)",
+                    ),
+                    (
+                        f"{evaluations['mrr_at_5']:.2f}",
+                        "MRR@5: первая верная статья наверху (порог 0.65)",
+                    ),
+                    (
+                        f"{evaluations['no_hit_accuracy']:.2f}",
+                        "молчание на вопросы без ответа (порог 0.80)",
+                    ),
+                    (
+                        f"{evaluations['agent_passed']}/{evaluations['agent_total']}",
+                        "сценариев безопасности агента (нужны все)",
+                    ),
+                ],
+                TEAL_L,
+                TEAL,
+                TEXT,
+            ),
+        ),
+        Spacer(1, 8),
+        p(
+            f"Набор: {evaluations['questions']} размеченных вопроса к семи статьям, "
+            "из них шесть без ответа в базе. Qdrant строится в памяти тем же кодом, "
+            "что и в API; сеть, ключи и PostgreSQL не нужны. Нарушение любого "
+            "порога делает CI красным.",
+            BODY_S,
+        ),
+        Spacer(1, 8),
+        evidence_table(
+            ["Что пытается сделать модель", "Что делает сервер"],
+            [
+                ("Сослаться на статью, которую не искала", "Запуск отклонён"),
+                (
+                    "По injection вызвать send_email или save_draft",
+                    "unknown_tool: таких инструментов нет",
+                ),
+                (
+                    "Прочитать чужое обращение или чужой продукт",
+                    "out_of_scope / invalid_arguments",
+                ),
+                (
+                    "Превысить лимит шагов или вызовов",
+                    "Остановка до выполнения лишнего",
+                ),
+            ],
+            [230, W - 230],
+        ),
+        Spacer(1, 9),
+        p("Демонстрация за 5-7 минут", H2),
+        code_block(
+            "uv run --locked python scripts/demo_scenario.py \\\n"
+            "  --url http://127.0.0.1:8001"
+        ),
+        Spacer(1, 6),
+        Diagram(62, demo_flow),
+        Spacer(1, 6),
+        p(
+            "Скрипт проверяет mock и индекс, создаёт или переиспользует вымышленные "
+            "записи и оставляет одно предложение pending. Решение принимает человек "
+            "в интерфейсе; повтор скрипта ничего не дублирует. Порядок показа - "
+            "docs/DEMO.md.",
+            BODY_S,
+        ),
+        Spacer(1, 8),
+        callout(
+            "Оценки проверяют учебный mock-поиск и серверные гарантии. Качество, "
+            "стоимость и задержка реальной модели не измерялись: в отчёте они "
+            "явно помечены как not measured.",
+            AMBER,
+            AMBER_L,
+        ),
+    ]
+
+    # 13. Дорожная карта
+    section(
+        story,
+        "13",
         "Дорожная карта",
-        "Десять этапов учебного проекта: семь уже готовы.",
+        "Десять этапов учебного проекта: все готовы.",
         GREEN,
     )
     story += [
@@ -2362,7 +2619,8 @@ def build_story(verification):
         Spacer(1, 10),
         callout(
             "Каждый этап - отдельная пошаговая инструкция на русском: "
-            '<font name="Mono">docs/STAGE_01.md … STAGE_07.md</font>. В журнале '
+            '<font name="Mono">docs/STAGE_01.md … STAGE_10.md</font>, '
+            'сценарий показа - <font name="Mono">docs/DEMO.md</font>. В журнале '
             '<font name="Mono">docs/DEVELOPMENT_LOG.md</font> записано, что именно '
             "проверено и чем.",
             GREEN,
@@ -2370,10 +2628,10 @@ def build_story(verification):
         ),
     ]
 
-    # 12. Словарь
+    # 14. Словарь
     section(
         story,
-        "12",
+        "14",
         "Словарь и куда читать дальше",
         "Термины, которые встречаются в проекте.",
         MUTED,
@@ -2410,6 +2668,11 @@ def build_story(verification):
         ("Human in the loop", "Шаг, где решение принимает человек, а не модель."),
         ("Smoke-тест", "Быстрая проверка, что запущенная система отвечает как надо."),
         ("CI/CD, GHCR", "Автопроверки на GitHub и публикация Docker-образа в реестр."),
+        ("Streamlit", "Библиотека Python для веб-интерфейса из обычного скрипта."),
+        (
+            "Recall@5 / MRR",
+            "Доля нужных статей в первых пяти / насколько высоко первая из них.",
+        ),
     ]
     rows = [[p("Термин", HEAD), p("Простыми словами", HEAD)]]
     rows += [[p(f"<b>{term}</b>", CELL), p(text, CELL)] for term, text in glossary]
@@ -2432,8 +2695,8 @@ def build_story(verification):
                     ),
                 ],
                 [
-                    p("docs/STAGE_01-07.md", CELL_M),
-                    p("Пошаговые учебные инструкции по этапам на русском", CELL),
+                    p("docs/STAGE_01-10.md", CELL_M),
+                    p("Пошаговые учебные инструкции по этапам; DEMO.md - показ", CELL),
                 ],
                 [
                     p("docs/APPROACH.md", CELL_M),
@@ -2468,7 +2731,7 @@ def append_audit_pages(story, verification):
     tests = verification["tests"]
     section(
         story,
-        "13",
+        "15",
         "Итоги полной проверки",
         "Результаты относятся к этой версии исходников; "
         "удалённый CI проверяется отдельно.",
@@ -2492,7 +2755,7 @@ def append_audit_pages(story, verification):
                 ),
                 ("Unit / интеграционные", f"{tests['unit']} / {tests['integration']}"),
                 ("Smoke CLI (входит в unit)", tests["smoke_cli"]),
-                ("Контракт HTTP", "22 URL-пути, 27 операций"),
+                ("Контракт HTTP", "25 URL-путей, 31 операция"),
             ],
             [210, W - 210],
         ),
@@ -2522,7 +2785,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "14",
+        "16",
         "CI: матрица проверок",
         "Каждый push в main проходит последовательные барьеры "
         "перед публикацией образа.",
@@ -2564,9 +2827,14 @@ def append_audit_pages(story, verification):
                     "Реальная схема, данные и поиск",
                 ),
                 (
+                    "Оценки",
+                    "32 вопроса поиска, 12 сценариев агента",
+                    "Пороги качества и безопасности",
+                ),
+                (
                     "Контейнер",
-                    "Сборка, readiness, UID и runtime",
-                    "Запускается готовый образ без root",
+                    "Образы API и UI: readiness, UID, состав",
+                    "Готовые образы без root и лишнего",
                 ),
                 (
                     "Полный сценарий",
@@ -2577,6 +2845,11 @@ def append_audit_pages(story, verification):
                     "Пересоздание",
                     "Данные, индекс, pending workflow",
                     "Состояние сохраняется в томах",
+                ),
+                (
+                    "UI и демо",
+                    "Health UI; демо с обеими ветвями; повтор",
+                    "Показ воспроизводится без ручных шагов",
                 ),
                 (
                     "Доставка",
@@ -2607,7 +2880,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "15",
+        "17",
         "Защита и доставка",
         "Технические ограничения проекта, права GitHub и "
         "воспроизводимая версия образа.",
@@ -2680,8 +2953,8 @@ def append_audit_pages(story, verification):
         p("Граница реализованной защиты", H2),
         p(
             "Аудит зависимостей ищет известные уязвимости на дату "
-            "проверки. Проверки не заменяют "
-            "авторизацию и оценку качества ответов. reviewer_id "
+            "проверки. Проверки не заменяют авторизацию, а оценки "
+            "не измеряют качество реальной модели. reviewer_id "
             "остаётся учебной отметкой; "
             "входа сотрудников и прав доступа ещё нет. CD "
             "заканчивается в GHCR: внешняя "
@@ -2692,7 +2965,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "16",
+        "18",
         "Полный локальный прогон",
         "Команды из корня проекта. Для сброса схемы "
         "используются отдельные тестовые сервисы.",
@@ -2709,7 +2982,8 @@ def append_audit_pages(story, verification):
         code_block(
             "uv run --locked ruff check .\n"
             "uv run --locked ruff format --check .\n"
-            "uv run --locked python scripts/check_project.py"
+            "uv run --locked python scripts/check_project.py\n"
+            "uv run --locked python -m evaluations.run"
         ),
         Spacer(1, 8),
         p("3. Выполнить весь Pytest без пропусков", H2),
@@ -2744,7 +3018,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "17",
+        "19",
         "Практика оператора",
         "Полный путь через Swagger: можно повторить без "
         "программирования и ключа модели.",
@@ -2838,7 +3112,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "18",
+        "20",
         "Перезапуск и данные",
         "Остановка контейнеров, сохранность томов и продолжение решения сотрудника.",
         GREEN,
@@ -2910,7 +3184,7 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "19",
+        "21",
         "Диагностика ошибок",
         "Начинай с первого неуспешного шага; повторная "
         "публикация не исправляет ошибку тестов.",
@@ -3004,10 +3278,9 @@ def append_audit_pages(story, verification):
 
     section(
         story,
-        "20",
+        "22",
         "Что делать дальше",
-        "Готовый API и CI дают основу для интерфейса; "
-        "реальную модель подключают отдельно.",
+        "Десять этапов готовы; дальше - реальная модель, доступ и эксплуатация.",
         BLUE,
     )
     story += [
@@ -3018,19 +3291,9 @@ def append_audit_pages(story, verification):
             ["Следующая работа", "Критерий готовности"],
             [
                 (
-                    "Этап 08: Streamlit",
-                    "Список и карточка обращений; анализ; источники; "
-                    "pending очередь; approve/reject через API",
-                ),
-                (
-                    "Этап 09: оценки",
-                    "Размеченные вопросы, ожидаемые статьи, метрики "
-                    "поиска и критерии ответа; негативные сценарии",
-                ),
-                (
                     "Реальный OpenAI",
                     "Пользователь задаёт ключ и доступную модель "
-                    "локально; отдельный ограниченный ручной запрос",
+                    "локально; тот же набор оценок с отчётом о стоимости",
                 ),
                 (
                     "Вход и роли",
@@ -3038,9 +3301,13 @@ def append_audit_pages(story, verification):
                     "reviewer_id из доверенного контекста",
                 ),
                 (
-                    "Этап 10: показ",
-                    "Воспроизводимый сценарий, скриншоты, примеры API и "
-                    "проверяемые результаты",
+                    "Настоящая доставка",
+                    "Email или helpdesk; учёт повторов, журнал попыток, "
+                    "тест отказа внешнего сервиса",
+                ),
+                (
+                    "Образ UI в GHCR",
+                    "Второй пакет реестра и шаг publish после проверки прав",
                 ),
                 (
                     "Внешний сервер",
@@ -3101,6 +3368,7 @@ def load_verification(path):
         "remote_ci",
         "changes",
         "remaining",
+        "evaluations",
     ):
         if key not in data:
             raise ValueError(f"В verification.json отсутствует {key}")
@@ -3124,6 +3392,16 @@ def load_verification(path):
             isinstance(item, str) for item in data[key]
         ):
             raise ValueError(f"{key}: требуется список строк")
+    evaluations = data["evaluations"]
+    for key in ("recall_at_5", "mrr_at_5", "no_hit_accuracy"):
+        value = evaluations.get(key)
+        if type(value) not in (int, float) or not 0 <= value <= 1:
+            raise ValueError(f"evaluations.{key}: требуется число от 0 до 1")
+    for key in ("questions", "agent_passed", "agent_total"):
+        if type(evaluations.get(key)) is not int or evaluations[key] < 0:
+            raise ValueError(f"evaluations.{key}: требуется неотрицательное целое")
+    if evaluations["agent_passed"] > evaluations["agent_total"]:
+        raise ValueError("Пройденных сценариев больше, чем всего сценариев")
     remote = data["remote_ci"]
     if remote.get("status") not in {
         "not_verified",
