@@ -6,15 +6,18 @@ Support operators need customer information, license details, and technical docu
 
 The project uses fictional TechFlow products and artificial support data.
 
-## Current implementation: Stages 01–04
+## Current implementation: Stages 01–05
 
-The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client now produces a structured draft preview from an existing ticket without modifying stored records.
+The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client produces a structured draft preview from an existing ticket without modifying stored records. A bounded agent gathers facts through four read-only tools and saves its run together with a pending reply suggestion for human review.
 
 ```text
 HTTP client → Uvicorn → FastAPI
                          ├─ GET /health → application status
                          ├─ GET /ready  → PostgreSQL + Alembic revision check
                          ├─ /api/* → routers → services → PostgreSQL
+                         ├─ POST /api/tickets/{id}/analyze → agent runtime
+                         │      ├─ provider (mock / OpenAI Responses)
+                         │      └─ read-only tools → PostgreSQL
                          └─ /docs and /openapi.json → API documentation
 
 Explicit demo CLI → SQLAlchemy session → PostgreSQL
@@ -56,12 +59,12 @@ Alembic migrations → versioned PostgreSQL schema
 | `Ticket` / `tickets` | Customer/product links, subject, description, priority and status |
 | `TicketMessage` / `ticket_messages` | Message content, author type and optional employee reference |
 | `KnowledgeDocument` / `knowledge_documents` | Metadata of future Markdown articles, unique document key and source path |
-| `AgentRun` / `agent_runs` | Future execution record linked to an existing ticket |
-| `AgentSuggestion` / `agent_suggestions` | Future suggested content and the employee's review decision |
+| `AgentRun` / `agent_runs` | Agent run for a ticket: status, provider/model, steps, tool trace, token usage, structured result or safe error |
+| `AgentSuggestion` / `agent_suggestions` | Suggested reply and the employee's review decision; the agent creates only `pending` |
 
 Foreign keys maintain record ownership. Database checks restrict statuses, priorities, date ranges, message authors, and suggestion review fields. Indexed foreign keys support joins. Identity keys are `BIGINT`; recorded timestamps include time-zone information.
 
-Knowledge documents store metadata rather than a second copy of future Markdown content. Suggestions reach their ticket through `agent_runs.ticket_id`, avoiding a duplicate ticket reference. Agent tables describe future storage and do not execute an agent or implement human review behavior. Employee roles are data constraints and do not enforce access control.
+Knowledge documents store metadata rather than a second copy of future Markdown content. Suggestions reach their ticket through `agent_runs.ticket_id`, avoiding a duplicate ticket reference. Since Stage 05 the agent writes these tables; approving or rejecting a suggestion is not implemented yet. Employee roles are data constraints and do not enforce access control.
 
 `updated_at` is initialized by PostgreSQL and updated by SQLAlchemy when it issues an update for the mapped record. Direct SQL updates must set it explicitly; this stage creates no timestamp trigger.
 
@@ -93,9 +96,21 @@ The response contains summary, category, draft reply, provider, actual response 
 
 The actual OpenAI SDK parser is exercised with a substituted HTTP transport. CI never requires a key or sends paid requests. Live OpenAI validation remains pending until credentials and an accessible model are configured. The [Stage 04 guide](STAGE_04.md) documents each file, mock verification, explicit live setup, and these verification limits.
 
+## Agent with read-only tools
+
+Stage 05 adds `POST /api/tickets/{resource_id}/analyze` and `GET /api/agent-runs/{resource_id}` (`app/agent`, `app/services/agents.py`, `app/api/agents.py`). The optional request body accepts only a `license_key` hint. The server builds the access scope — ticket, customer, and product IDs — from the stored ticket; the model cannot replace it.
+
+`AgentRuntime` alternates provider turns and tool execution. Each turn must contain either function calls or a final `DraftContent`, never both. The whole batch is validated before the first tool runs: unique call IDs, the global tool-call budget, and no reused IDs. Limits are `AGENT_MAX_STEPS`, `AGENT_MAX_TOOL_CALLS`, and `AGENT_TIMEOUT_SECONDS` (a monotonic deadline for the whole loop), plus fixed character bounds for the transcript (64000), tool arguments (4096), and tool results (16000). Exceeding a bound stops the run instead of truncating silently.
+
+The four tools are `get_ticket`, `get_customer` (without email), `get_license` (only within the ticket's customer and product; `valid` also checks issue and expiry dates), and `get_ticket_history` (up to five other tickets for the same customer and product). Arguments are parsed by strict Pydantic schemas that reject unknown fields, type coercion, and duplicate JSON keys. Invalid calls return a structured tool error to the model and still consume the budget. Each tool opens its own short session with `SET TRANSACTION READ ONLY` and statement/lock timeouts, so PostgreSQL itself rejects writes. The trace stores validated arguments with license keys masked.
+
+The service never holds a database connection while waiting for the provider. It reads the ticket, ends that transaction, commits a `running` run, executes the loop, and then saves either `completed` with the result, trace, usage, and exactly one `pending` suggestion, or `failed` with a constant safe message and partial progress — each in one transaction. Errors after the run starts return `run_id`. A process crash during the final commit may leave a run `running`; there is no recovery job yet.
+
+The mock provider performs three deterministic steps with the real tools and labels its reply as a demonstration. The OpenAI adapter uses the Responses API with strict function schemas, `store=False`, no retries, disabled truncation, and replays all output items, including `reasoning.encrypted_content`. It is tested with the real SDK and a substituted HTTP transport; no live model request has been made. Migration `0002_agent_runtime` adds the run fields with backward-compatible defaults. The [Stage 05 guide](STAGE_05.md) documents the full flow.
+
 ## Schema lifecycle and local startup
 
-The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. Runtime startup never calls `Base.metadata.create_all()`.
+The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. The second revision, `0002_agent_runtime`, adds agent run fields and CHECK constraints while preserving existing rows. Runtime startup never calls `Base.metadata.create_all()`.
 
 Compose uses one application image for migration and API services:
 
@@ -112,7 +127,7 @@ For development with automatic reload, only PostgreSQL needs to run in Docker. A
 
 ## Verification and database isolation
 
-Unit tests cover the HTTP contract, safe readiness failures, configuration, engine/session behavior, and the smoke CLI. Real PostgreSQL integration tests apply migrations, compare models with the resulting schema, exercise records and constraints, and check transaction behavior and migration rollback.
+Unit tests cover the HTTP contract, safe readiness failures, configuration, engine/session behavior, and the smoke CLI. Real PostgreSQL integration tests apply migrations, compare models with the resulting schema, exercise records and constraints, and check transaction behavior and migration rollback. Agent integration tests cover saved runs and suggestions, released connections during provider turns, failed runs with partial progress, tool scope, read-only tool transactions, and upgrading Stage 02 data to the agent schema.
 
 The integration fixtures reset their schema between scenarios. They require an explicit `TEST_DATABASE_URL` pointing to a database whose name ends in `_test`; they never reuse `DATABASE_URL` as a fallback. Local runs without a test URL report skipped integration tests. A missing URL in CI is an error.
 
@@ -124,7 +139,7 @@ Run lint, formatting, and the full test suite using the commands in the [README]
 
 `.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. The Python job installs locked dependencies, starts its PostgreSQL 17 service, applies migrations, checks schema drift with `alembic check`, runs Ruff lint and formatting checks, and executes all Pytest tests against the explicit test database. The independent lint, formatting, and test steps still report their outcomes if another check fails.
 
-After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-database --check-api --check-llm` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. With `--check-llm`, a status guard requires configured mock before any POST. The smoke explicitly creates three fictional fixture records, requests a preview, and verifies the ticket remains unchanged. CI fixes mock mode and supplies no OpenAI credentials. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, compares it with the original, and checks HTTP readiness again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
+After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-agent` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. With `--check-llm`, a status guard requires configured mock before any POST. The smoke explicitly creates three fictional fixture records, requests a preview, and verifies the ticket remains unchanged. `--check-agent` includes these checks, adds a fictional license, runs the mock agent, checks the four-tool trace and pending suggestion, and reads the same run back through GET. CI fixes mock mode and supplies no OpenAI credentials. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot and the saved agent run, compares both with the originals, and runs the HTTP smoke again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
 
 The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration and migrations. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
 
@@ -148,10 +163,10 @@ FastAPI routes → business services → repositories → PostgreSQL
               document search → Qdrant
 ```
 
-The interface will communicate through the API. Server-side services will enforce access rules and expose a restricted set of agent tools. The agent will prepare a suggestion for human review. LangGraph will be introduced after a basic tool-calling loop is understood and implemented.
+The interface will communicate through the API. Server-side services enforce the data scope and expose a restricted set of agent tools. The agent prepares a suggestion for human review. LangGraph will be introduced on top of the basic tool-calling loop implemented in Stage 05.
 
-PostgreSQL, its schema, create/read REST business operations, and LLM draft previews are implemented. Qdrant, agent tools, authentication, saved human review, and the operator interface remain future work.
+PostgreSQL, its schema, create/read REST business operations, LLM draft previews, and the bounded agent with read-only tools are implemented. Qdrant, document retrieval, authentication, approving or rejecting suggestions, and the operator interface remain future work.
 
 ## Next step
 
-Stage 05 will add restricted tools and a bounded tool-calling loop. The model can then request customer/license checks through validated Python functions. The current draft preview provides the provider boundary; saved investigation runs, retrieval, human review, and the operator interface follow the roadmap.
+Stage 06 will add a knowledge base with embeddings and Qdrant search, so the agent can cite documentation sources in its draft. Human review decisions, LangGraph orchestration, and the operator interface follow the roadmap.

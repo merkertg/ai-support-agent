@@ -1,4 +1,4 @@
-"""Схема поддержки: клиенты, лицензии, обращения и будущие записи агента.
+"""Схема поддержки: клиенты, лицензии, обращения и история работы агента.
 
 Эти классы описывают данные. Они не реализуют API, авторизацию, запуск LLM
 или поиск по базе знаний. Реальную схему PostgreSQL изменяет только Alembic.
@@ -13,11 +13,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Integer,
     String,
     Text,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -183,7 +185,7 @@ class KnowledgeDocument(Base):
 
 
 class AgentRun(Base):
-    """Будущая запись запуска агента; сам агент на этапе 02 не запускается."""
+    """Сохранённый запуск: прогресс инструментов, итог или безопасная ошибка."""
 
     __tablename__ = "agent_runs"
     __table_args__ = (
@@ -193,6 +195,9 @@ class AgentRun(Base):
         CheckConstraint(
             "finished_at IS NULL OR finished_at >= started_at", name="dates"
         ),
+        CheckConstraint("provider IN ('mock', 'openai')", name="provider"),
+        CheckConstraint("steps >= 0", name="steps"),
+        CheckConstraint("jsonb_typeof(tool_trace) = 'array'", name="tool_trace"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -200,7 +205,16 @@ class AgentRun(Base):
         ForeignKey("tickets.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(String(20), server_default="pending")
+    provider: Mapped[str] = mapped_column(String(20), server_default="mock")
     model: Mapped[str | None] = mapped_column(String(200))
+    steps: Mapped[int] = mapped_column(Integer, server_default="0")
+    # JSONB хранит только проверенный и ограниченный runtime протокол.
+    # none_as_null сохраняет SQL NULL, а не JSON null, для незавершённого итога.
+    tool_trace: Mapped[list[dict]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
+    usage: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -209,7 +223,7 @@ class AgentRun(Base):
 
 
 class AgentSuggestion(Base):
-    """Будущее предложение агента с решением и сотрудником-рецензентом."""
+    """Черновик агента: pending ожидает решения сотрудника и не отправляется."""
 
     __tablename__ = "agent_suggestions"
     __table_args__ = (

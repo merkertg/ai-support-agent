@@ -17,9 +17,13 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
 
 
 def valid_responses(
-    check_database: bool = False, check_api: bool = False, check_llm: bool = False
+    check_database: bool = False,
+    check_api: bool = False,
+    check_llm: bool = False,
+    check_agent: bool = False,
 ) -> dict[str, tuple[int, bytes]]:
     """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
+    check_llm = check_llm or check_agent
     check_api = check_api or check_llm
     check_database = check_database or check_api
     paths = {"/health": {"get": {}}}
@@ -30,6 +34,9 @@ def valid_responses(
     if check_llm:
         paths["/api/llm/status"] = {"get": {}}
         paths["/api/tickets/{resource_id}/draft"] = {"post": {}}
+    if check_agent:
+        paths["/api/tickets/{resource_id}/analyze"] = {"post": {}}
+        paths["/api/agent-runs/{resource_id}"] = {"get": {}}
     if check_database:
         paths["/ready"] = {"get": {}}
     responses = {
@@ -86,7 +93,64 @@ def valid_responses(
                 ),
             }
         )
+    if check_agent:
+        run = json.dumps(agent_run()).encode()
+        responses.update(
+            {
+                "/api/licenses": (201, b'{"id":14}'),
+                "/api/tickets/13/analyze": (201, run),
+                "/api/agent-runs/21": (200, run),
+            }
+        )
     return responses
+
+
+def agent_run() -> dict:
+    """Собрать сохранённый mock-запуск с четырьмя успешными инструментами."""
+    reply = "Демонстрационный агент. Реальная модель не вызывалась."
+
+    def call(name: str, arguments: dict, data: dict) -> dict:
+        """Описать один вызов так, как его возвращает API."""
+        return {
+            "call_id": f"mock-{name}",
+            "name": name,
+            "arguments": arguments,
+            "result": {"ok": True, "data": data},
+        }
+
+    return {
+        "id": 21,
+        "ticket_id": 13,
+        "status": "completed",
+        "provider": "mock",
+        "model": "mock-agent-v1",
+        "started_at": "2026-10-18T00:00:00Z",
+        "finished_at": "2026-10-18T00:00:01Z",
+        "error_message": None,
+        "steps": 3,
+        "tool_trace": [
+            call("get_ticket", {"ticket_id": 13}, {"ticket": {"id": 13}}),
+            call("get_customer", {"customer_id": 11}, {"customer": {"id": 11}}),
+            call(
+                "get_ticket_history",
+                {"customer_id": 11, "limit": 5},
+                {"tickets": [], "limit": 5},
+            ),
+            call("get_license", {"license_key": "***"}, {"valid": True}),
+        ],
+        "usage": None,
+        "result": {
+            "summary": "Обращение №13",
+            "category": "license_question",
+            "draft_reply": reply,
+        },
+        "suggestion": {
+            "id": 31,
+            "content": reply,
+            "status": "pending",
+            "requires_human_review": True,
+        },
+    }
 
 
 @contextmanager
@@ -132,6 +196,7 @@ def run_smoke(
     check_database: bool = False,
     check_api: bool = False,
     check_llm: bool = False,
+    check_agent: bool = False,
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
@@ -141,6 +206,8 @@ def run_smoke(
         command.append("--check-api")
     if check_llm:
         command.append("--check-llm")
+    if check_agent:
+        command.append("--check-agent")
     return subprocess.run(
         command,
         capture_output=True,
@@ -403,3 +470,104 @@ def test_cli_rejects_ticket_mutation_by_draft() -> None:
         result = run_smoke(url, check_llm=True)
     assert result.returncode == 1
     assert "изменил сохранённое обращение" in result.stderr
+
+
+def test_cli_checks_saved_agent_run_and_unchanged_ticket() -> None:
+    """--check-agent включает mock-черновик, затем проверяет POST и GET запуска."""
+    responses = valid_responses(check_agent=True)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_agent=True)
+    assert result.returncode == 0, result.stderr
+    # Обращение читается дважды: после черновика и после анализа агентом.
+    expected = Counter({endpoint: 1 for endpoint in responses})
+    expected["/api/tickets/13"] = 2
+    assert requests == expected
+    assert "четыре инструмента" in result.stdout
+    assert "Smoke test пройден" in result.stdout
+
+
+def test_cli_refuses_agent_mode_before_any_post_for_real_provider() -> None:
+    """Агент не запускается и записи не создаются, если провайдер не mock."""
+    responses = valid_responses(check_agent=True)
+    responses["/api/llm/status"] = (
+        200,
+        b'{"provider":"openai","model":"gpt","configured":true}',
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_agent=True)
+    assert result.returncode == 1
+    assert "POST не выполнялись" in result.stderr
+    assert requests["/api/licenses"] == 0
+    assert requests["/api/tickets/13/analyze"] == 0
+
+
+@pytest.mark.parametrize("missing", ["analyze", "agent-runs"])
+def test_cli_requires_agent_operations_before_writing_license(missing: str) -> None:
+    """Без маршрутов агента в OpenAPI лицензия и запуск не создаются."""
+    responses = valid_responses(check_agent=True)
+    schema = json.loads(responses["/openapi.json"][1])
+    schema["paths"] = {
+        path: operations
+        for path, operations in schema["paths"].items()
+        if missing not in path
+    }
+    responses["/openapi.json"] = (200, json.dumps(schema).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_agent=True)
+    assert result.returncode == 1
+    assert "отсутствует операция" in result.stderr
+    assert requests["/api/licenses"] == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "failed"},
+        {"provider": "openai"},
+        {"model": "unknown"},
+        {"steps": 2},
+        {"error_message": "Ошибка"},
+        {"result": None},
+        {"suggestion": None},
+        {"suggestion": {"id": 31, "content": "x", "status": "approved"}},
+        "drop_license_call",
+        "raw_license_key",
+        "license_invalid",
+        "tool_error",
+        "missing_marker",
+    ],
+)
+def test_cli_rejects_wrong_agent_run(change) -> None:
+    """Отклонить провал, утечку ключа, ложную проверку и отсутствие pending."""
+    run = agent_run()
+    if isinstance(change, dict):
+        run |= change
+    elif change == "drop_license_call":
+        run["tool_trace"].pop()
+    elif change == "raw_license_key":
+        run["tool_trace"][3]["arguments"] = {"license_key": "SMOKE-LEAKED"}
+    elif change == "license_invalid":
+        run["tool_trace"][3]["result"]["data"]["valid"] = False
+    elif change == "tool_error":
+        run["tool_trace"][1]["result"] = {"ok": False, "error": {"code": "x"}}
+    else:
+        run["result"]["draft_reply"] = "Ответ без пометки"
+        run["suggestion"]["content"] = "Ответ без пометки"
+    responses = valid_responses(check_agent=True)
+    responses["/api/tickets/13/analyze"] = (201, json.dumps(run).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_agent=True)
+    assert result.returncode == 1
+    assert "неверный контракт сохранённого запуска" in result.stderr
+    assert requests["/api/agent-runs/21"] == 0
+
+
+def test_cli_rejects_saved_run_that_differs_from_post() -> None:
+    """GET обязан вернуть ровно тот запуск, который сохранил POST."""
+    responses = valid_responses(check_agent=True)
+    stored = agent_run() | {"steps": 4}
+    responses["/api/agent-runs/21"] = (200, json.dumps(stored).encode())
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_agent=True)
+    assert result.returncode == 1
+    assert "сохранённый запуск отличается" in result.stderr

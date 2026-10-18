@@ -20,6 +20,15 @@ EXPECTED_MOCK_LLM_STATUS = {
     "model": "mock-draft-v1",
     "configured": True,
 }
+# Порядок вызовов учебного mock-агента при переданном ключе лицензии.
+EXPECTED_AGENT_TOOLS = [
+    "get_ticket",
+    "get_customer",
+    "get_ticket_history",
+    "get_license",
+]
+DRAFT_CATEGORIES = {"technical_issue", "license_question", "how_to", "other"}
+MOCK_NOTE = "Реальная модель не вызывалась."
 
 
 class SmokeTestError(Exception):
@@ -191,7 +200,7 @@ def check_business_api(url: str, paths: dict, deadline: float) -> None:
 def create_smoke_record(
     url: str, resource: str, payload: dict, deadline: float
 ) -> dict:
-    """Явно создать учебную запись только в дополнительном режиме --check-llm.
+    """Явно создать учебную запись только в режимах --check-llm и --check-agent.
 
     Случайный суффикс задаёт вызывающая функция: повтор запуска не заменяет
     существующие данные. При сетевой ошибке POST никогда не повторяется.
@@ -212,7 +221,18 @@ def create_smoke_record(
     return record
 
 
-def check_mock_llm(url: str, paths: dict, deadline: float) -> None:
+def has_operation(paths: dict, prefix: str, suffix: str, method: str) -> bool:
+    """Найти операцию с параметром пути независимо от имени параметра."""
+    return any(
+        path.startswith(prefix)
+        and path.endswith(suffix)
+        and isinstance(operations, dict)
+        and isinstance(operations.get(method), dict)
+        for path, operations in paths.items()
+    )
+
+
+def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
     """Проверить mock-черновик; сначала запретить платный режим, затем писать.
 
     Флаг создаёт три вымышленные записи (клиент, продукт, обращение). Сам
@@ -224,13 +244,7 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> None:
         status_path.get("get"), dict
     ):
         raise SmokeTestError("/openapi.json: отсутствует операция GET /api/llm/status")
-    if not any(
-        path.startswith("/api/tickets/{")
-        and path.endswith("}/draft")
-        and isinstance(operations, dict)
-        and isinstance(operations.get("post"), dict)
-        for path, operations in paths.items()
-    ):
+    if not has_operation(paths, "/api/tickets/{", "}/draft", "post"):
         raise SmokeTestError(
             "/openapi.json: отсутствует операция POST /api/tickets/{id}/draft"
         )
@@ -287,10 +301,9 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> None:
         or set(content) != {"summary", "category", "draft_reply"}
         or not isinstance(content.get("summary"), str)
         or not content["summary"].strip()
-        or content.get("category")
-        not in {"technical_issue", "license_question", "how_to", "other"}
+        or content.get("category") not in DRAFT_CATEGORIES
         or not isinstance(content.get("draft_reply"), str)
-        or "Реальная модель не вызывалась." not in content["draft_reply"]
+        or MOCK_NOTE not in content["draft_reply"]
     ):
         raise SmokeTestError(
             f"{endpoint}: неверный контракт демонстрационного черновика"
@@ -302,6 +315,105 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> None:
         raise SmokeTestError("Черновик изменил сохранённое обращение")
     print(f"OK {endpoint}: демонстрационный черновик, требуется проверка человеком")
     print("OK обращение не изменилось; созданы только три явные учебные записи")
+    return {"customer": customer, "product": product, "ticket": ticket}
+
+
+def valid_agent_run(run: dict, ticket_id: int) -> bool:
+    """Проверить сохранённый mock-запуск: четыре инструмента и pending-черновик."""
+    trace = run.get("tool_trace")
+    result = run.get("result")
+    suggestion = run.get("suggestion")
+    if (
+        type(run.get("id")) is not int
+        or run["id"] <= 0
+        or run.get("ticket_id") != ticket_id
+        or run.get("status") != "completed"
+        or run.get("provider") != "mock"
+        or run.get("model") != "mock-agent-v1"
+        or run.get("error_message") is not None
+        or run.get("steps") != 3
+        or not isinstance(trace, list)
+        or not all(isinstance(item, dict) for item in trace)
+        or [item.get("name") for item in trace] != EXPECTED_AGENT_TOOLS
+        or not all(
+            isinstance(item.get("result"), dict) and item["result"].get("ok") is True
+            for item in trace
+        )
+        or not isinstance(result, dict)
+        or set(result) != {"summary", "category", "draft_reply"}
+        or result.get("category") not in DRAFT_CATEGORIES
+        or not isinstance(result.get("draft_reply"), str)
+        or MOCK_NOTE not in result["draft_reply"]
+        or not isinstance(suggestion, dict)
+        or type(suggestion.get("id")) is not int
+        or suggestion.get("status") != "pending"
+        or suggestion.get("requires_human_review") is not True
+        or suggestion.get("content") != result["draft_reply"]
+    ):
+        return False
+    # Ключ в журнале маскируется, а результат проверки берётся из инструмента.
+    license_call = trace[3]
+    data = license_call["result"].get("data")
+    return license_call.get("arguments") == {"license_key": "***"} and (
+        isinstance(data, dict) and data.get("valid") is True
+    )
+
+
+def check_mock_agent(
+    url: str, paths: dict, deadline: float, records: dict[str, dict]
+) -> None:
+    """Проверить сохранённый запуск агента на учебных записях --check-llm.
+
+    Вызывается только после подтверждения mock в check_mock_llm. Создаёт
+    лицензию, запуск и pending-предложение; обращение при этом не меняется.
+    """
+    if not has_operation(paths, "/api/tickets/{", "}/analyze", "post"):
+        raise SmokeTestError(
+            "/openapi.json: отсутствует операция POST /api/tickets/{id}/analyze"
+        )
+    if not has_operation(paths, "/api/agent-runs/{", "}", "get"):
+        raise SmokeTestError(
+            "/openapi.json: отсутствует операция GET /api/agent-runs/{id}"
+        )
+    customer, product, ticket = (
+        records["customer"],
+        records["product"],
+        records["ticket"],
+    )
+    license_key = f"SMOKE-{uuid4().hex[:12].upper()}"
+    create_smoke_record(
+        url,
+        "licenses",
+        {
+            "customer_id": customer["id"],
+            "product_id": product["id"],
+            "license_key": license_key,
+        },
+        deadline,
+    )
+    endpoint = f"/api/tickets/{ticket['id']}/analyze"
+    body = fetch(
+        f"{url}{endpoint}",
+        deadline,
+        method="POST",
+        payload={"license_key": license_key},
+        expected_status=201,
+    )
+    run = json_object(body, endpoint)
+    if license_key.encode() in body or not valid_agent_run(run, ticket["id"]):
+        raise SmokeTestError(f"{endpoint}: неверный контракт сохранённого запуска")
+    print(f"OK {endpoint}: HTTP 201, четыре инструмента, черновик ожидает проверки")
+    stored_endpoint = f"/api/agent-runs/{run['id']}"
+    stored = json_object(fetch(f"{url}{stored_endpoint}", deadline), stored_endpoint)
+    if stored != run:
+        raise SmokeTestError(f"{stored_endpoint}: сохранённый запуск отличается")
+    print(f"OK {stored_endpoint}: GET читает тот же запуск без нового вызова модели")
+    unchanged = json_object(
+        fetch(f"{url}/api/tickets/{ticket['id']}", deadline), "/api/tickets/{id}"
+    )
+    if unchanged != ticket:
+        raise SmokeTestError("Агент изменил сохранённое обращение")
+    print("OK обращение не изменилось; добавлены лицензия, запуск и предложение")
 
 
 def run_checks(
@@ -310,8 +422,11 @@ def run_checks(
     check_database: bool = False,
     check_api: bool = False,
     check_llm: bool = False,
+    check_agent: bool = False,
 ) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
+    # Агент использует учебные записи и проверку mock из --check-llm.
+    check_llm = check_llm or check_agent
     # Предметное API требует БД, поэтому --check-api включает и /ready.
     check_api = check_api or check_llm
     check_database = check_database or check_api
@@ -376,7 +491,9 @@ def run_checks(
     if check_api:
         check_business_api(url, paths, deadline)
     if check_llm:
-        check_mock_llm(url, paths, deadline)
+        records = check_mock_llm(url, paths, deadline)
+        if check_agent:
+            check_mock_agent(url, paths, deadline, records)
 
 
 def main() -> int:
@@ -412,6 +529,14 @@ def main() -> int:
             "включает --check-api"
         ),
     )
+    parser.add_argument(
+        "--check-agent",
+        action="store_true",
+        help=(
+            "только mock: дополнительно создать лицензию и сохранённый запуск "
+            "агента; включает --check-llm"
+        ),
+    )
     args = parser.parse_args()
     try:
         run_checks(
@@ -420,6 +545,7 @@ def main() -> int:
             check_database=args.check_database,
             check_api=args.check_api,
             check_llm=args.check_llm,
+            check_agent=args.check_agent,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

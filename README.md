@@ -1,7 +1,8 @@
 # AI Support Agent
 
-**Начни с [инструкции этапа 04 на русском](docs/STAGE_04.md):**
-черновик ответа по обращению, mock-режим, настройка OpenAI и проверка ошибок.
+**Начни с [инструкции этапа 05 на русском](docs/STAGE_05.md):**
+агент с инструментами чтения, сохранённый запуск и черновик для проверки человеком.
+[Этап 04](docs/STAGE_04.md) объясняет предварительный черновик, mock и настройку OpenAI.
 [Этап 03](docs/STAGE_03.md) объясняет создание и чтение записей через API.
 [Этап 02](docs/STAGE_02.md) объясняет PostgreSQL, модели, миграции и запуск.
 [Журнал разработки](docs/DEVELOPMENT_LOG.md) объясняет каждый выполненный шаг;
@@ -9,7 +10,7 @@
 
 A Python learning project for a technical support assistant. The future product will help an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery.
 
-The current implementation covers **Stages 01–04**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, Alembic migrations, twelve business API operations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. The API creates, lists, and reads customers, products, licenses, and tickets. Draft previews support a local mock and an explicitly configured OpenAI provider. Tool calling is the next stage.
+The current implementation covers **Stages 01–05**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, two Alembic migrations, twelve business API operations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. The API creates, lists, and reads customers, products, licenses, and tickets. Draft previews support a local mock and an explicitly configured OpenAI provider. A bounded agent reads the ticket, customer, license, and ticket history through four read-only tools and saves its run with a `pending` reply suggestion for human review. Document search (RAG) is the next stage.
 
 ## Requirements
 
@@ -105,6 +106,23 @@ uv run --locked python scripts/smoke_test.py \
 
 This explicit flag first rejects any provider other than configured mock, then creates **three fictional records** (customer, product, ticket) and checks the draft and unchanged ticket. It also includes database and business API checks. Use the ordinary smoke command above when you only want read checks.
 
+## Analyze a ticket with the agent
+
+`POST /api/tickets/{resource_id}/analyze` runs a bounded tool-calling loop for an existing ticket and returns HTTP 201 with the saved run. The optional JSON body accepts only `license_key`; other fields return 422. The agent can call four read-only server functions: `get_ticket`, `get_customer` (no email), `get_license` (only within the ticket's customer and product, with a date-aware `valid` flag), and `get_ticket_history` (up to five other tickets of the same customer and product). Model-provided names and arguments are validated on the server and never become SQL or Python code; tool transactions are `READ ONLY` in PostgreSQL.
+
+A successful run stores `completed`, the tool trace (license keys masked as `***`), the structured `summary`/`category`/`draft_reply`, and exactly one `pending` suggestion. The agent never changes the ticket or sends a reply. `GET /api/agent-runs/{resource_id}` reads the saved run without calling the model again. Every POST creates a new run.
+
+Limits apply to both mock and OpenAI: `AGENT_MAX_STEPS` (default 6, at most 8), `AGENT_MAX_TOOL_CALLS` (default 12, at most 20), and `AGENT_TIMEOUT_SECONDS` (default 60, at most 120). A limit stop, timeout, or provider error after the run has started returns its safe error together with `run_id`; the run is saved as `failed` with partial progress and no suggestion. The mock agent needs three steps and four tool calls when a license key is given.
+
+Check the whole agent path in a running mock stack:
+
+```bash
+uv run --locked python scripts/smoke_test.py \
+  --base-url http://127.0.0.1:8001 --timeout 60 --check-agent
+```
+
+`--check-agent` includes `--check-llm` and additionally creates a fictional license, an agent run, and a suggestion. The [Stage 05 guide](docs/STAGE_05.md) walks through each request, the saved trace, error handling, migration `0002_agent_runtime`, and the OpenAI adapter, which is tested only with a substituted HTTP transport.
+
 ## Optional: run the API on the host
 
 For Python development with automatic reload, start PostgreSQL in Docker and run the API from `.venv`. `.env` contains separate URLs for host Python (`127.0.0.1:5433`) and Compose services (`db:5432`).
@@ -156,7 +174,7 @@ Docker build + Compose readiness + HTTP smoke + database persistence check
 Publish the tested image to GHCR (push to main only)
 ```
 
-The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks health/readiness and the business API, validates a mock draft, and compares saved records before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. CI explicitly selects mock with no OpenAI credentials. The draft smoke creates disposable fixture records only after confirming mock configuration. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
+The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks health/readiness and the business API, validates a mock draft and a saved mock agent run, and compares saved demo records and that agent run before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. CI explicitly selects mock with no OpenAI credentials. The draft and agent smoke checks create disposable fixture records only after confirming mock configuration. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
 
 Images use `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The current tip of `main` can also update `latest`. The workflow delivers an image to the registry; running it on an external server is a later step.
 
@@ -171,9 +189,11 @@ app/
   main.py                # /health, /ready, API lifecycle and router registration
   api/
     routes.py            # Thin HTTP handlers for four resources
+    agents.py            # Agent analysis and saved-run routes
     dependencies.py      # Request sessions and safe database errors
-  schemas/               # Validated resources and structured draft responses
+  schemas/               # Validated resources, drafts and agent runs
   llm/                   # Independent settings, mock/OpenAI clients and safe errors
+  agent/                 # Agent limits, loop, read-only tools and mock/OpenAI providers
   services/              # Business checks, queries and explicit transactions
   config.py              # DATABASE_URL from environment or .env
   db/
@@ -184,7 +204,7 @@ app/
     entities.py          # Nine relational models
 migrations/
   env.py                 # Alembic execution and database URL handling
-  versions/              # Versioned schema creation and rollback
+  versions/              # Stage 02 schema and Stage 05 agent run fields
 tests/
   integration/           # Real PostgreSQL, migrations and complete HTTP workflows
   test_health.py         # Standalone API behavior
@@ -193,8 +213,10 @@ tests/
   test_smoke_test.py     # Real HTTP smoke CLI regression tests
   test_llm.py            # Real SDK parser with a substituted HTTP transport
   test_drafts_api.py     # Draft/status HTTP behavior without paid requests
+  test_agent_*.py        # Agent loop, tools and providers without network
+  test_agents_api.py     # Agent HTTP contract and safe errors
 scripts/
-  smoke_test.py          # Health, readiness and business API checks
+  smoke_test.py          # Health, readiness, business API, draft and agent checks
 docs/
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian
@@ -202,6 +224,7 @@ docs/
   STAGE_02.md            # Database learning guide in Russian
   STAGE_03.md            # Business API learning guide in Russian
   STAGE_04.md            # LLM integration learning guide in Russian
+  STAGE_05.md            # Agent with tools learning guide in Russian
   DEVELOPMENT_LOG.md     # Step-by-step implementation log
 compose.yaml             # PostgreSQL, migration, API and isolated test database
 alembic.ini              # Migration configuration without a stored database URL
@@ -221,7 +244,7 @@ README.md
 | 02 | PostgreSQL, SQLAlchemy models, Alembic migrations | Implemented; includes readiness, demo records and database checks |
 | 03 | Customer, product, license, and ticket REST APIs | Implemented: create, list and read with PostgreSQL integration tests |
 | 04 | LLM draft previews and error handling | Implemented; mock and SDK transport tested, live OpenAI validation requires credentials |
-| 05 | Tool calling and the agent execution loop | Planned |
+| 05 | Tool calling and the agent execution loop | Implemented; mock agent saves runs and pending suggestions, live OpenAI validation requires credentials |
 | 06 | RAG, embeddings, and Qdrant document search | Planned |
 | 07 | LangGraph workflow and human review | Planned |
 | 08 | Streamlit operator interface | Planned |
@@ -235,6 +258,7 @@ README.md
 - [Stage 02 learning guide](docs/STAGE_02.md)
 - [Stage 03 learning guide](docs/STAGE_03.md)
 - [Stage 04 learning guide](docs/STAGE_04.md)
+- [Stage 05 learning guide](docs/STAGE_05.md)
 - [Development log](docs/DEVELOPMENT_LOG.md)
 - [CI/CD and Docker guide](docs/CI_CD.md)
 

@@ -146,10 +146,12 @@ jobs:
           docker compose --project-name ai-support-ci up \
             --detach --no-build --wait --wait-timeout 90 api
 
-      - name: Check HTTP endpoints and database readiness
+      # --check-agent включает БД, API, mock-черновик и сохранённый запуск агента.
+      # Журнал нужен следующему шагу: из него берётся ID созданного запуска.
+      - name: Check HTTP endpoints, database readiness and agent run
         run: |
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-database --check-api --check-llm
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-agent | tee smoke.log
 
       # Подтверждаем, что данные находятся в постоянном томе PostgreSQL.
       # После пересоздания контейнеров только читаем: seed мог бы скрыть потерю.
@@ -157,6 +159,10 @@ jobs:
         run: |
           docker compose --project-name ai-support-ci exec -T api \
             python -m app.db.demo seed > before.json
+          # Запуск агента тоже должен пережить пересоздание контейнеров.
+          run_path="$(grep -o -m 1 '/api/agent-runs/[0-9]*' smoke.log)"
+          test -n "$run_path"
+          curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-before.json
           # down без --volumes сохраняет named volume, но удаляет контейнеры.
           docker compose --project-name ai-support-ci down
           docker compose --project-name ai-support-ci up \
@@ -164,8 +170,10 @@ jobs:
           docker compose --project-name ai-support-ci exec -T api \
             python -m app.db.demo show > after.json
           cmp before.json after.json
+          curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-after.json
+          cmp run-before.json run-after.json
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-database --check-api --check-llm
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-agent
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image
