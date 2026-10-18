@@ -522,6 +522,17 @@ def test_server_failure_remains_an_operator_message(monkeypatch):
     assert screen.error[0].value == "API временно недоступен."
 
 
+@pytest.mark.parametrize("status", ["resolved", "closed"])
+def test_closed_ticket_disables_analysis(desktop, status):
+    """Закрытое обращение показывает причину и не отправляет запрос анализа."""
+    screen, api = desktop
+    api.records["tickets"][1]["status"] = status
+    open_ticket(screen)
+    assert find(screen.button, "Запустить анализ").disabled
+    assert any("Обращение закрыто" in item.value for item in screen.info)
+    assert api.posts == []
+
+
 def test_missing_provider_status_disables_analysis(desktop):
     """Неизвестный embedding provider не допускает потенциально платный вызов."""
     screen, api = desktop

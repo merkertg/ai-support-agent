@@ -13,7 +13,7 @@ dependencies = [
     "langgraph>=1.2.12,<1.3",  # Граф процесса: анализ → решение человека → доставка.
     # Checkpointer хранит состояние графа в PostgreSQL между HTTP-запросами.
     "langgraph-checkpoint-postgres>=3.1.2,<3.2",
-    "openai>=3.35.0",  # Официальный SDK: Responses API и Structured Outputs.
+    "openai>=3.24.0,<4",  # Официальный SDK: Responses API и Structured Outputs.
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2,<3",
     "qdrant-client>=1.19.1,<2",  # Официальный клиент векторной БД для поиска документов.
@@ -31,6 +31,13 @@ dev = [
     "pytest",  # Находит и запускает автоматические тесты.
     "ruff",    # Проверяет код и его форматирование.
 ]
+
+# Политика зависимостей: в lock попадают только выпуски старше двух недель.
+# uv не видит файлы PyPI новее этой даты. При обновлении зависимостей сдвинь
+# дату не ближе чем на 14 дней к текущему дню; CI проверяет это отдельно
+# скриптом scripts/check_dependency_age.py по датам публикации в uv.lock.
+[tool.uv]
+exclude-newer = "2026-10-04T00:00:00Z"
 
 # Pytest ищет тесты в tests/ и добавляет корень проекта в путь импортов.
 [tool.pytest.ini_options]

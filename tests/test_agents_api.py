@@ -151,12 +151,30 @@ def test_missing_ticket_has_priority_over_provider_configuration(
     session.commit.assert_not_called()
 
 
+@pytest.mark.parametrize("status", ["resolved", "closed"])
+def test_closed_ticket_has_priority_over_provider_configuration(
+    agent_dependencies: tuple[Mock, Mock], status: str
+) -> None:
+    """Закрытое обращение даёт 409 до фабрики провайдера и до записи AgentRun."""
+    session, factory = agent_dependencies
+    session.get.return_value = Ticket(id=7, customer_id=1, product_id=2, status=status)
+    factory.side_effect = LLMConfigurationError()
+    with TestClient(application.app) as client:
+        response = client.post("/api/tickets/7/analyze")
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "Обращение закрыто: анализ недоступен"}
+    factory.assert_not_called()
+    session.add.assert_not_called()
+
+
 def test_bad_provider_configuration_does_not_create_running_record(
     agent_dependencies: tuple[Mock, Mock],
 ) -> None:
     """Настройка проверяется после освобождения соединения, до первой записи."""
     session, factory = agent_dependencies
     session.get.return_value = Ticket(id=7, customer_id=1, product_id=2)
+    # Нет ни ожидающего предложения, ни идущего запуска этого обращения.
+    session.scalar.return_value = None
 
     def unavailable_provider():
         """Убедиться, что конфигурационная ошибка случилась после конца чтения."""

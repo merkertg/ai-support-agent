@@ -13,6 +13,15 @@ import httpx
 
 PAGE_SIZE = 20
 MAX_ID = 2**63 - 1
+# 409 у анализа и решения означает разные состояния: подсказка зависит от действия.
+ANALYZE_CONFLICT = (
+    "Анализ не запущен: обращение закрыто, уже анализируется или ждёт решения "
+    "по предложению. Проверьте историю запусков и очередь проверки."
+)
+REVIEW_CONFLICT = (
+    "Решение не сохранено: предложение уже рассмотрено или обращение закрыто "
+    "(тогда предложение можно только отклонить). Обновите данные."
+)
 
 
 @dataclass
@@ -90,6 +99,7 @@ class APIClient:
         params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
         expected: type = dict,
+        conflict: str | None = None,
     ) -> Any:
         """Прочитать JSON и скрыть непредвиденный HTML, traceback или сетевой адрес."""
         try:
@@ -107,7 +117,7 @@ class APIClient:
                 "Нет соединения с API. Проверьте запуск сервисов."
             ) from error
         if not response.is_success:
-            self._raise_error(response)
+            self._raise_error(response, conflict)
         try:
             value = response.json()
         except ValueError as error:
@@ -117,7 +127,7 @@ class APIClient:
         return value
 
     @staticmethod
-    def _raise_error(response: httpx.Response) -> None:
+    def _raise_error(response: httpx.Response, conflict: str | None = None) -> None:
         """Сопоставить код ответа безопасной подсказке без вывода тела ошибки."""
         messages = {
             404: "Запись не найдена. Проверьте её идентификатор.",
@@ -134,6 +144,8 @@ class APIClient:
                 run_id = candidate
         except (ValueError, AttributeError):
             pass
+        if conflict is not None:
+            messages[409] = conflict
         raise APIError(
             messages.get(response.status_code, "API не смог выполнить действие."),
             response.status_code,
@@ -192,6 +204,7 @@ class APIClient:
             "POST",
             f"/api/tickets/{positive_id(ticket_id)}/analyze",
             payload={"license_key": license_key or None},
+            conflict=ANALYZE_CONFLICT,
         )
 
     def review(self, suggestion_id: int, payload: dict) -> dict:
@@ -200,6 +213,7 @@ class APIClient:
             "POST",
             f"/api/suggestions/{positive_id(suggestion_id)}/review",
             payload=payload,
+            conflict=REVIEW_CONFLICT,
         )
 
     def messages(self, ticket_id: int, *, offset: int = 0) -> list[dict]:

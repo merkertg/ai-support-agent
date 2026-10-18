@@ -7,6 +7,7 @@ Lint, formatting, unit and integration tests, migration checks, and offline eval
 ## Verify
 
 ```bash
+uv run --locked python scripts/check_dependency_age.py
 uv run --locked python scripts/check_project.py
 uv run --locked ruff check .
 uv run --locked ruff format --check .
@@ -15,6 +16,8 @@ uv run --locked python -m evaluations.run
 ```
 
 The default `uv sync --locked` installs the `dev` group, which includes the `ui` group, so the Streamlit AppTest checks in `tests/test_operator_ui.py` run with the rest of the suite.
+
+`scripts/check_dependency_age.py` fails when any locked package was published on PyPI less than 14 days ago; the `[tool.uv] exclude-newer` date in `pyproject.toml` keeps `uv lock` from picking such releases.
 
 `python -m evaluations.run` measures retrieval quality and the agent's server-side safety contract without network, keys, or PostgreSQL. It writes `reports/evaluations.json` and exits `1` when a threshold from `evaluations/thresholds.json` is violated. Metrics, scenarios, and limits are described in the [Stage 09 guide](../STAGE_09.md).
 

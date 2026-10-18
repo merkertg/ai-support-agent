@@ -1545,7 +1545,7 @@ def ci_pipeline(c, w, h):
     jobs = [
         (
             "1. checks + security",
-            "lock, Ruff и документы\nмиграции + Pytest\n"
+            "lock и возраст ≥ 14 дн.\nRuff, документы, Pytest\n"
             "оценки поиска и агента\nactionlint и pip-audit (API + UI)",
             BLUE_L,
             BLUE,
@@ -2083,8 +2083,8 @@ def build_story(verification):
             [
                 (
                     "Проверка до продолжения",
-                    "Неверный сотрудник получает 404, а граф "
-                    "продолжает ждать: ожидание не тратится на ошибку.",
+                    "Неверный сотрудник получает 404, одобрение закрытого "
+                    "обращения - 409, а граф продолжает ждать.",
                     GREEN,
                     GREEN_L,
                 ),
@@ -2203,7 +2203,7 @@ def build_story(verification):
             "Агент",
             "POST",
             "/api/tickets/{id}/analyze",
-            "Анализ; запускает граф проверки",
+            "Анализ и граф проверки; 409, если обращение закрыто или ждёт решения",
         ),
         (
             "",
@@ -2262,7 +2262,7 @@ def build_story(verification):
                 ],
                 [
                     p("<b>409</b>", CELL),
-                    p("конфликт: дубликат, уже рассмотрено", CELL),
+                    p("конфликт: дубликат, решение принято, обращение закрыто", CELL),
                     p("<b>503</b>", CELL),
                     p("БД, Qdrant или провайдер недоступны", CELL),
                 ],
@@ -2808,8 +2808,8 @@ def append_audit_pages(story, verification):
             [
                 (
                     "Зависимости",
-                    "uv sync --locked; pip-audit 2.10.1 по хешам",
-                    "Отдельный security job; известные уязвимости",
+                    "uv sync --locked; возраст ≥ 14 дн.; pip-audit 2.10.1",
+                    "Нет слишком свежих и известных уязвимых выпусков",
                 ),
                 (
                     "checks: код и документы",
@@ -2982,6 +2982,7 @@ def append_audit_pages(story, verification):
         code_block(
             "uv run --locked ruff check .\n"
             "uv run --locked ruff format --check .\n"
+            "uv run --locked python scripts/check_dependency_age.py\n"
             "uv run --locked python scripts/check_project.py\n"
             "uv run --locked python -m evaluations.run"
         ),
@@ -3245,9 +3246,9 @@ def append_audit_pages(story, verification):
                     "Выбрать действующий reviewer_id",
                 ),
                 (
-                    "HTTP 409 review",
-                    "Состояние предложения",
-                    "Прочитать уже принятое решение",
+                    "HTTP 409",
+                    "Предложение, статус обращения, запуски",
+                    "Принять решение, отклонить или сменить статус",
                 ),
                 (
                     "HTTP 502 / 504",

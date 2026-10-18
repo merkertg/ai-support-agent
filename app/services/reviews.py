@@ -3,7 +3,8 @@
 Одобрение создаёт сообщение обращения от имени сотрудника и переводит
 обращение в waiting_customer. Письмо клиенту не отправляется: сообщение
 в PostgreSQL и есть «доставка» в этом учебном проекте. Отклонение только
-сохраняет решение и причину; обращение не меняется.
+сохраняет решение и причину; обращение не меняется. Закрытое обращение
+(resolved или closed) ответ не получает: его предложение можно только отклонить.
 """
 
 from datetime import UTC, datetime
@@ -12,11 +13,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentRun, AgentSuggestion, Ticket, TicketMessage, User
+from app.schemas.resources import CLOSED_TICKET_STATUSES
 from app.schemas.reviews import SuggestionDetailRead, SuggestionStatus
 from app.services.errors import ResourceConflict, ResourceNotFound
 
 SUGGESTION_NOT_FOUND = "Предложение агента не найдено"
 ALREADY_REVIEWED = "Предложение уже рассмотрено"
+TICKET_CLOSED = (
+    "Обращение закрыто: одобрение и доставка недоступны. "
+    "Отклоните предложение или откройте обращение заново"
+)
 
 
 def suggestion_read(
@@ -78,12 +84,12 @@ def get_suggestion(session: Session, suggestion_id: int) -> SuggestionDetailRead
 
 
 def check_reviewable(
-    session: Session, suggestion_id: int, reviewer_id: int
+    session: Session, suggestion_id: int, reviewer_id: int, decision: str
 ) -> AgentRun:
-    """До продолжения графа проверить предложение и сотрудника; вернуть запуск.
+    """До продолжения графа проверить предложение, сотрудника и обращение.
 
-    Проверка выполняется раньше resume: иначе неверный id сотрудника
-    «израсходовал» бы ожидание графа, и процесс нельзя было бы продолжить.
+    Проверка выполняется раньше resume: иначе неверный id сотрудника или
+    закрытое обращение «израсходовали» бы ожидание графа до отказа в узле.
     """
     suggestion = session.get(AgentSuggestion, suggestion_id)
     if suggestion is None:
@@ -98,6 +104,10 @@ def check_reviewable(
     run = session.get(AgentRun, suggestion.agent_run_id)
     if run is None:
         raise ResourceNotFound(SUGGESTION_NOT_FOUND)
+    if decision == "approve":
+        ticket = session.get(Ticket, run.ticket_id)
+        if ticket.status in CLOSED_TICKET_STATUSES:
+            raise ResourceConflict(TICKET_CLOSED)
     return run
 
 
@@ -125,6 +135,9 @@ def apply_review(session: Session, suggestion_id: int, review: dict) -> dict:
         ticket = session.scalar(
             select(Ticket).where(Ticket.id == run.ticket_id).with_for_update()
         )
+        if review["decision"] == "approve" and ticket.status in CLOSED_TICKET_STATUSES:
+            # Статус мог смениться после предварительной проверки: решает блокировка.
+            raise ResourceConflict(TICKET_CLOSED)
         reviewed_at = datetime.now(UTC)
         message_id = None
         if review["decision"] == "approve":

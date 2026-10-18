@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent.config import get_agent_settings
@@ -16,12 +16,17 @@ from app.llm.errors import LLMError, LLMUnavailableError
 from app.models import AgentRun, AgentSuggestion, Ticket
 from app.schemas.agents import AgentRunRead, AnalyzeRequest, SuggestionRead
 from app.schemas.drafts import AgentDraftContent
-from app.services.errors import ResourceNotFound
+from app.schemas.resources import CLOSED_TICKET_STATUSES
+from app.services.errors import ResourceConflict, ResourceNotFound
 from app.services.knowledge import open_configured_index
 
 # Фабрика возвращается из Depends без вызова. Существование обращения
 # проверяем раньше конфигурации внешнего провайдера, как и в /draft.
 ProviderFactory = Callable[[], AgentProvider]
+# Запас поверх лимита времени агента: running старше лимита и запаса оставлен
+# аварийно остановленным процессом и не блокирует новый анализ обращения.
+STALE_RUNNING_GRACE_SECONDS = 60
+TICKET_CLOSED = "Обращение закрыто: анализ недоступен"
 
 
 class AgentRunFailure(Exception):
@@ -120,6 +125,45 @@ def finish_run(
             )
 
 
+def ensure_analyzable(session: Session, ticket: Ticket, timeout_seconds: float) -> None:
+    """Запретить анализ закрытого обращения и второй черновик того же обращения.
+
+    Иначе у обращения копились бы несколько pending-предложений, и одобрение
+    каждого доставило бы клиенту отдельный ответ. Окончательная проверка идёт
+    под блокировкой строки обращения, поэтому параллельные запуски не обходят её.
+    """
+    if ticket.status in CLOSED_TICKET_STATUSES:
+        raise ResourceConflict(TICKET_CLOSED)
+    pending = session.scalar(
+        select(AgentSuggestion.id)
+        .join(AgentRun, AgentRun.id == AgentSuggestion.agent_run_id)
+        .where(AgentRun.ticket_id == ticket.id, AgentSuggestion.status == "pending")
+        .order_by(AgentSuggestion.id)
+        .limit(1)
+    )
+    if pending is not None:
+        raise ResourceConflict(
+            f"У обращения уже есть предложение {pending} на проверке: "
+            "примите по нему решение до нового анализа"
+        )
+    # Время сравнивается на стороне PostgreSQL: started_at задаёт тот же сервер.
+    window = func.make_interval(
+        0, 0, 0, 0, 0, 0, timeout_seconds + STALE_RUNNING_GRACE_SECONDS
+    )
+    running = session.scalar(
+        select(AgentRun.id)
+        .where(
+            AgentRun.ticket_id == ticket.id,
+            AgentRun.status == "running",
+            AgentRun.started_at > func.now() - window,
+        )
+        .order_by(AgentRun.id)
+        .limit(1)
+    )
+    if running is not None:
+        raise ResourceConflict(f"Анализ обращения уже выполняется: запуск {running}")
+
+
 def analyze_ticket(
     session: Session,
     ticket_id: int,
@@ -139,6 +183,9 @@ def analyze_ticket(
     ticket = session.get(Ticket, ticket_id)
     if ticket is None:
         raise ResourceNotFound("Обращение не найдено")
+    settings = get_agent_settings()
+    # Быстрый отказ до настройки провайдера; повтор под блокировкой ниже.
+    ensure_analyzable(session, ticket, settings.agent_timeout_seconds)
     context = AgentContext(
         ticket_id=ticket.id,
         customer_id=ticket.customer_id,
@@ -149,10 +196,20 @@ def analyze_ticket(
     session.rollback()
     # Некорректная конфигурация не должна оставлять фиктивный running.
     provider = provider_factory()
-    settings = get_agent_settings()
     executor = SQLToolExecutor(engine, context, knowledge=knowledge_factory)
     runtime = AgentRuntime(provider, executor, settings)
     with session.begin():
+        # FOR UPDATE выстраивает параллельные анализы одного обращения в очередь:
+        # второй запрос увидит running первого и получит 409.
+        locked = session.scalar(
+            select(Ticket)
+            .where(Ticket.id == ticket_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked is None:
+            raise ResourceNotFound("Обращение не найдено")
+        ensure_analyzable(session, locked, settings.agent_timeout_seconds)
         run = AgentRun(
             ticket_id=ticket_id,
             status="running",

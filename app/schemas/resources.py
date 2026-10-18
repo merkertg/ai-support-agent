@@ -48,6 +48,8 @@ Description = Annotated[
 LicenseStatus = Literal["active", "expired", "revoked"]
 TicketPriority = Literal["low", "medium", "high", "critical"]
 TicketStatus = Literal["open", "in_progress", "waiting_customer", "resolved", "closed"]
+# Закрытое обращение не анализируется и не получает доставку ответа.
+CLOSED_TICKET_STATUSES = frozenset({"resolved", "closed"})
 UserRole = Literal["operator", "admin"]
 
 

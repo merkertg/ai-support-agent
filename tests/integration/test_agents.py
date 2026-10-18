@@ -330,20 +330,71 @@ def test_analysis_without_license_hint_does_not_claim_license_check(
     assert "Лицензия не проверялась" in run["result"]["draft_reply"]
 
 
-def test_each_post_creates_new_run_and_new_suggestion(
+def test_second_analysis_waits_for_pending_suggestion(
     agent_client: tuple[TestClient, list[Session]],
     scope: dict[str, int],
     migrated_engine: Engine,
 ) -> None:
-    """Повторный POST не перезаписывает прежний результат: идемпотентности нет."""
+    """Пока предложение ждёт решения, второй анализ того же обращения — 409.
+
+    Иначе у обращения копились бы черновики, и одобрение каждого доставило бы
+    клиенту отдельный ответ.
+    """
     client, _ = agent_client
     first = client.post(f"/api/tickets/{scope['ticket']}/analyze")
     second = client.post(f"/api/tickets/{scope['ticket']}/analyze")
-    assert first.status_code == second.status_code == 201
-    assert first.json()["id"] != second.json()["id"]
-    assert first.json()["suggestion"]["id"] != second.json()["suggestion"]["id"]
+    assert first.status_code == 201, first.text
+    assert second.status_code == 409, second.text
+    suggestion_id = first.json()["suggestion"]["id"]
+    assert f"предложение {suggestion_id} на проверке" in second.json()["detail"]
+    assert count(migrated_engine, AgentRun) == 1
+    assert count(migrated_engine, AgentSuggestion) == 1
+
+
+def test_running_analysis_blocks_until_it_is_stale(
+    agent_client: tuple[TestClient, list[Session]],
+    scope: dict[str, int],
+    migrated_engine: Engine,
+) -> None:
+    """Свежий running означает идущий анализ; брошенный после сбоя — не мешает."""
+    client, _ = agent_client
+    with Session(migrated_engine) as session, session.begin():
+        stuck = AgentRun(ticket_id=scope["ticket"], status="running", model="m")
+        session.add(stuck)
+        session.flush()
+        stuck_id = stuck.id
+    blocked = client.post(f"/api/tickets/{scope['ticket']}/analyze")
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == (
+        f"Анализ обращения уже выполняется: запуск {stuck_id}"
+    )
+    # Старше лимита агента и запаса: процесс, начавший анализ, уже не работает.
+    with migrated_engine.begin() as connection:
+        connection.execute(
+            update(AgentRun)
+            .where(AgentRun.id == stuck_id)
+            .values(started_at=func.now() - text("interval '1 hour'"))
+        )
+    resumed = client.post(f"/api/tickets/{scope['ticket']}/analyze")
+    assert resumed.status_code == 201, resumed.text
     assert count(migrated_engine, AgentRun) == 2
-    assert count(migrated_engine, AgentSuggestion) == 2
+
+
+@pytest.mark.parametrize("status", ["resolved", "closed"])
+def test_closed_ticket_is_not_analyzed(
+    agent_client: tuple[TestClient, list[Session]],
+    scope: dict[str, int],
+    migrated_engine: Engine,
+    status: str,
+) -> None:
+    """Закрытое обращение не получает новый запуск и черновик."""
+    client, _ = agent_client
+    changed = client.patch(f"/api/tickets/{scope['ticket']}", json={"status": status})
+    assert changed.status_code == 200, changed.text
+    response = client.post(f"/api/tickets/{scope['ticket']}/analyze")
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "Обращение закрыто: анализ недоступен"}
+    assert count(migrated_engine, AgentRun) == 0
 
 
 def test_postgres_connection_is_released_while_provider_waits(

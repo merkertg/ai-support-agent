@@ -86,7 +86,7 @@ GitHub показывает кнопку ручного запуска, когд
 Обновление main на GitHub
         │
         ▼
-checks: зависимости → workflow и документация → Alembic → Ruff → все тесты → оценки
+checks: зависимости и их возраст → workflow и документация → Alembic → Ruff → тесты → оценки
 security: lock-файл → аудит известных уязвимостей зависимостей API и UI
         │ только при успехе обоих заданий
         ▼
@@ -112,6 +112,7 @@ Qdrant 1.19.1, а `TEST_QDRANT_URL` указывает на него. В обр�
 
 ```bash
 uv sync --locked
+uv run --locked python scripts/check_dependency_age.py --min-age-days 14
 uv run --locked python scripts/check_project.py
 uv run --locked alembic upgrade head
 uv run --locked alembic check
@@ -124,6 +125,11 @@ uv run --locked python -m evaluations.run --output reports/evaluations.json
 - `uv sync --locked` создаёт окружение по `uv.lock`. Если описание зависимостей
   в `pyproject.toml` не соответствует lock-файлу, команда завершается ошибкой.
   CI не должен незаметно менять зафиксированные версии.
+- `scripts/check_dependency_age.py` требует, чтобы каждый пакет в `uv.lock`
+  был опубликован на PyPI не меньше 14 дней назад, а дата `[tool.uv]
+  exclude-newer` в `pyproject.toml` была не ближе той же границы. Даты берутся
+  из самого lock-файла. Свежий выпуск блокирует доставку, пока ему не исполнится
+  две недели или пока lock не вернут на более раннюю версию.
 - `scripts/check_project.py` проверяет локальные ссылки Markdown, синтаксис
   примеров Bash/JSON и наличие docstrings у функций и классов. Ошибка инструкции
   блокирует доставку так же, как ошибка Python-кода.
@@ -598,6 +604,17 @@ docker compose --profile test stop db-test qdrant-test
 Если Ruff сообщает о форматировании, выполни `uv run --locked ruff format .`
 и посмотри `git diff`. При изменении зависимостей отдельно выполни `uv lock`
 и `uv sync --locked`; в коммит входят `pyproject.toml` и `uv.lock`.
+
+Чтобы получить более новые версии, сдвинь `exclude-newer` в `pyproject.toml`
+на дату не ближе 14 дней к текущей, затем выполни `uv lock` и проверку возраста:
+
+```bash
+uv lock
+uv run --locked python scripts/check_dependency_age.py --min-age-days 14
+```
+
+Скрипт читает даты публикации из `uv.lock` и называет каждый слишком свежий
+пакет. Сеть ему не нужна.
 
 ### Собрать и запустить полный стенд
 

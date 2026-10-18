@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import AgentRun, AgentSuggestion, Ticket, TicketMessage
 from app.schemas.agents import AgentRunRead
 from app.schemas.operator import DashboardRead, TicketStatusUpdate
-from app.schemas.resources import TicketRead
+from app.schemas.resources import CLOSED_TICKET_STATUSES, TicketRead
 from app.schemas.reviews import TicketMessageRead
 from app.services.agents import run_read
 from app.services.errors import ResourceNotFound
@@ -83,7 +83,7 @@ def read_dashboard(session: Session) -> DashboardRead:
             func.count(Ticket.id).filter(Ticket.status == "open"),
             func.count(Ticket.id).filter(
                 Ticket.priority.in_(["high", "critical"]),
-                Ticket.status.not_in(["resolved", "closed"]),
+                Ticket.status.not_in(sorted(CLOSED_TICKET_STATUSES)),
             ),
         )
     ).one()

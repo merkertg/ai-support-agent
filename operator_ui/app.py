@@ -16,6 +16,8 @@ TICKET_STATUSES = {
     "Решено": "resolved",
     "Закрыто": "closed",
 }
+# Закрытое обращение сервер не анализирует и не доставляет по нему ответ.
+CLOSED_STATUSES = {"resolved", "closed"}
 PRIORITIES = {
     "Низкий": "low",
     "Средний": "medium",
@@ -201,12 +203,20 @@ def ticket_card(client: APIClient, ticket_id: int, llm: dict, knowledge: dict) -
         key=f"analyze_confirm_{ticket_id}",
         purpose="Модель или поиск базы знаний при анализе",
     )
+    closed = ticket["status"] in CLOSED_STATUSES
+    if closed:
+        st.info(
+            "Обращение закрыто: новый анализ недоступен. Чтобы проанализировать "
+            "его снова, сначала смените статус."
+        )
     with st.form(f"analyze_ticket_{ticket_id}"):
         license_key = st.text_input(
             "Ключ лицензии для проверки (необязательно)", type="password", max_chars=255
         )
-        analyze = st.form_submit_button("Запустить анализ", disabled=not permitted)
-    if analyze and permitted:
+        analyze = st.form_submit_button(
+            "Запустить анализ", disabled=not permitted or closed
+        )
+    if analyze and permitted and not closed:
         with st.spinner("Агент изучает обращение…"):
             run = client.analyze(ticket_id, license_key.strip() or None)
         st.session_state[f"selected_run_{ticket_id}"] = str(run["id"])
@@ -314,7 +324,8 @@ def review_form(client: APIClient, suggestion: dict, reviewer_id: int) -> None:
         return
     st.caption(
         "Одобрение сохранит сообщение оператора и статус waiting_customer. "
-        "Внешнее письмо клиенту не отправляется."
+        "Внешнее письмо клиенту не отправляется. Предложение по закрытому "
+        "обращению (resolved или closed) можно только отклонить."
     )
     with st.form(f"review_{suggestion['id']}"):
         decision = st.radio("Решение", ["Одобрить", "Отклонить"], horizontal=True)

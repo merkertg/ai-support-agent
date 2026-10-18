@@ -1,0 +1,112 @@
+"""Проверить, что каждая зависимость из uv.lock опубликована не менее N дней назад.
+
+Политика проекта: новая версия пакета попадает в lock только после двух недель
+на PyPI. uv записывает в lock время загрузки каждого файла; скрипт берёт самое
+раннее время версии и сравнивает его с текущим моментом. Дополнительно
+проверяется дата `[tool.uv] exclude-newer` в pyproject.toml: по ней uv отбирает
+версии при `uv lock`. Используется только стандартная библиотека, без сети.
+"""
+
+import argparse
+import sys
+import tomllib
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MIN_AGE_DAYS = 14
+
+
+def parse_time(value: str) -> datetime:
+    """Прочитать время ISO 8601 и потребовать часовой пояс."""
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError(f"время без часового пояса: {value}")
+    return moment
+
+
+def release_time(package: dict) -> datetime | None:
+    """Вернуть самое раннее время загрузки файлов версии или None без данных."""
+    files = list(package.get("wheels", []))
+    if "sdist" in package:
+        files.append(package["sdist"])
+    times = [parse_time(item["upload-time"]) for item in files if "upload-time" in item]
+    return min(times) if times else None
+
+
+def check_lock(lock: dict, now: datetime, min_age: timedelta) -> tuple[list[str], int]:
+    """Найти слишком свежие пакеты и пакеты реестра без даты публикации."""
+    errors = []
+    checked = 0
+    cutoff = now - min_age
+    for package in lock.get("package", []):
+        if "registry" not in package.get("source", {}):
+            # Сам проект (virtual или editable) на PyPI не публикуется.
+            continue
+        name = f"{package['name']} {package['version']}"
+        released = release_time(package)
+        if released is None:
+            errors.append(f"{name}: в uv.lock нет upload-time, возраст не проверить")
+            continue
+        checked += 1
+        if released > cutoff:
+            age = (now - released).days
+            errors.append(f"{name}: опубликован {released.date()}, возраст {age} дн.")
+    return errors, checked
+
+
+def check_exclude_newer(
+    pyproject: dict, now: datetime, min_age: timedelta
+) -> list[str]:
+    """Потребовать границу uv не ближе минимального возраста к текущей дате."""
+    value = pyproject.get("tool", {}).get("uv", {}).get("exclude-newer")
+    if value is None:
+        return ["pyproject.toml: нет [tool.uv] exclude-newer"]
+    if parse_time(value) > now - min_age:
+        return [
+            f"pyproject.toml: exclude-newer {value} ближе "
+            f"{min_age.days} дн. к текущей дате"
+        ]
+    return []
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Вернуть 0 при соблюдении политики, 1 при нарушении, 2 при неверных файлах."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lock", type=Path, default=PROJECT_ROOT / "uv.lock")
+    parser.add_argument(
+        "--pyproject", type=Path, default=PROJECT_ROOT / "pyproject.toml"
+    )
+    parser.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS)
+    # Фиксированное «сейчас» нужно тестам; в CI используется текущее время.
+    parser.add_argument("--now", type=parse_time, default=None)
+    arguments = parser.parse_args(argv)
+    if arguments.min_age_days < 0:
+        parser.error("--min-age-days не может быть отрицательным")
+    now = arguments.now or datetime.now(UTC)
+    min_age = timedelta(days=arguments.min_age_days)
+    try:
+        lock = tomllib.loads(arguments.lock.read_text(encoding="utf-8"))
+        pyproject = tomllib.loads(arguments.pyproject.read_text(encoding="utf-8"))
+        errors, checked = check_lock(lock, now, min_age)
+        errors += check_exclude_newer(pyproject, now, min_age)
+    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as error:
+        print(f"Dependency age: invalid input: {error}", file=sys.stderr)
+        return 2
+    if errors:
+        print(
+            f"Dependency age: FAIL, нужно не меньше {min_age.days} дн. на PyPI:",
+            file=sys.stderr,
+        )
+        for line in errors:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    print(
+        f"Dependency age: OK, {checked} пакетов опубликованы не позже "
+        f"{(now - min_age).date()} ({min_age.days} дн. до {now.date()})."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

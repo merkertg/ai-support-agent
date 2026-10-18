@@ -8,7 +8,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.postgres import PostgresSaver
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from app.models import (
     TicketMessage,
     User,
 )
+from app.services import agents, reviews
 from app.workflow.checkpoint import open_saver
 
 pytestmark = pytest.mark.integration
@@ -126,6 +127,18 @@ def analyze(client: TestClient, ticket: dict, body: dict | None = None) -> dict:
     response = client.post(f"/api/tickets/{ticket['id']}/analyze", json=body or {})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def set_ticket_status(client: TestClient, ticket: dict, status: str) -> None:
+    """Сменить статус обращения так же, как это делает сотрудник в интерфейсе."""
+    response = client.patch(f"/api/tickets/{ticket['id']}", json={"status": status})
+    assert response.status_code == 200, response.text
+
+
+def message_count(engine: Engine) -> int:
+    """Посчитать все сообщения обращений в тестовой БД."""
+    with Session(engine) as session:
+        return session.scalar(select(func.count()).select_from(TicketMessage))
 
 
 def test_users_api_creates_lists_and_reads(client: TestClient) -> None:
@@ -644,3 +657,112 @@ def test_pending_after_rolled_back_review_can_receive_new_decision(
         assert (
             session.get(AgentSuggestion, run["suggestion"]["id"]).status == "rejected"
         )
+
+
+def test_closed_ticket_analysis_is_refused_without_checkpoint(
+    client: TestClient, ticket: dict, migrated_engine: Engine
+) -> None:
+    """Отказ происходит в узле analyze до записи: поток графа удаляется."""
+    set_ticket_status(client, ticket, "closed")
+    response = client.post(f"/api/tickets/{ticket['id']}/analyze", json={})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": agents.TICKET_CLOSED}
+    with migrated_engine.connect() as connection:
+        assert (
+            connection.execute(text("SELECT count(*) FROM checkpoints")).scalar() == 0
+        )
+        assert connection.execute(text("SELECT count(*) FROM agent_runs")).scalar() == 0
+
+
+@pytest.mark.parametrize("status", ["resolved", "closed"])
+def test_closed_ticket_suggestion_can_only_be_rejected(
+    client: TestClient, ticket: dict, migrated_engine: Engine, status: str
+) -> None:
+    """Закрытое обращение не получает ответ; ожидание графа при этом сохраняется."""
+    run = analyze(client, ticket)
+    user = reviewer(client)
+    suggestion_id = run["suggestion"]["id"]
+    set_ticket_status(client, ticket, status)
+    approve = client.post(
+        f"/api/suggestions/{suggestion_id}/review",
+        json={"decision": "approve", "reviewer_id": user["id"]},
+    )
+    assert approve.status_code == 409, approve.text
+    assert approve.json() == {"detail": reviews.TICKET_CLOSED}
+    workflow = client.get(f"/api/agent-runs/{run['id']}/workflow").json()
+    assert workflow["state"] == "awaiting_review"
+    reject = client.post(
+        f"/api/suggestions/{suggestion_id}/review",
+        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Закрыто"},
+    )
+    assert reject.status_code == 200, reject.text
+    result = reject.json()
+    assert result["suggestion"]["status"] == "rejected"
+    assert result["ticket_status"] == status
+    assert result["message"] is None
+    assert result["workflow"]["state"] == "rejected"
+    assert message_count(migrated_engine) == 0
+
+
+def test_ticket_closed_after_precheck_is_not_delivered(
+    client: TestClient,
+    ticket: dict,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Гонка: статус сменился после предварительной проверки, решает блокировка.
+
+    Отказ случается уже в узле deliver; следующий запрос восстанавливает
+    ожидание графа из фактов БД, и предложение можно отклонить.
+    """
+    run = analyze(client, ticket)
+    user = reviewer(client)
+    suggestion_id = run["suggestion"]["id"]
+    original = reviews.check_reviewable
+
+    def close_after_check(*args, **kwargs):
+        """Пропустить проверку открытым обращением и сразу закрыть его."""
+        result = original(*args, **kwargs)
+        with Session(migrated_engine) as other, other.begin():
+            other.execute(
+                update(Ticket).where(Ticket.id == ticket["id"]).values(status="closed")
+            )
+        return result
+
+    monkeypatch.setattr(reviews, "check_reviewable", close_after_check)
+    approve = client.post(
+        f"/api/suggestions/{suggestion_id}/review",
+        json={"decision": "approve", "reviewer_id": user["id"]},
+    )
+    assert approve.status_code == 409, approve.text
+    assert approve.json() == {"detail": reviews.TICKET_CLOSED}
+    monkeypatch.setattr(reviews, "check_reviewable", original)
+    assert message_count(migrated_engine) == 0
+    workflow = client.get(f"/api/agent-runs/{run['id']}/workflow").json()
+    assert workflow["state"] == "awaiting_review"
+    reject = client.post(
+        f"/api/suggestions/{suggestion_id}/review",
+        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Закрыто"},
+    )
+    assert reject.status_code == 200, reject.text
+    assert reject.json()["workflow"]["state"] == "rejected"
+    assert message_count(migrated_engine) == 0
+
+
+def test_new_analysis_is_allowed_after_decision(
+    client: TestClient, ticket: dict
+) -> None:
+    """После решения по предложению обращение можно проанализировать снова."""
+    run = analyze(client, ticket)
+    user = reviewer(client)
+    blocked = client.post(f"/api/tickets/{ticket['id']}/analyze", json={})
+    assert blocked.status_code == 409, blocked.text
+    rejected = client.post(
+        f"/api/suggestions/{run['suggestion']['id']}/review",
+        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Неточно"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    second = analyze(client, ticket)
+    assert second["id"] != run["id"]
+    queue = client.get("/api/suggestions", params={"status": "pending"}).json()
+    assert [item["id"] for item in queue] == [second["suggestion"]["id"]]

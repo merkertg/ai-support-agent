@@ -83,6 +83,12 @@ jobs:
         id: dependencies
         run: uv sync --locked
 
+      # Политика зависимостей: в uv.lock только выпуски PyPI старше двух недель.
+      # Даты публикации берутся из самого lock-файла, сеть не нужна.
+      - name: Check dependency release age
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python scripts/check_dependency_age.py --min-age-days 14
+
       # Проверяем сам workflow зафиксированным бинарным выпуском с SHA256.
       # Исключение относится только к новому queue: max, которого ещё нет в 1.7.12.
       - name: Validate GitHub Actions workflow
@@ -355,7 +361,7 @@ jobs:
         run: |
           docker compose --project-name ai-support-ci up \
             --detach --no-build --wait --wait-timeout 90 ui
-          curl --fail --silent --show-error http://127.0.0.1:8502/_stcore/health && echo
+          curl --fail --silent --show-error "http://127.0.0.1:${UI_PORT}/_stcore/health" && echo
           python3 scripts/demo_scenario.py \
             --url http://127.0.0.1:8000 --timeout 60 --verify-review > demo.json
           python3 -c '

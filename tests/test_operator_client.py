@@ -5,7 +5,14 @@ import json
 import httpx
 import pytest
 
-from operator_ui.client import APIClient, APIError, configured_api_url, positive_id
+from operator_ui.client import (
+    ANALYZE_CONFLICT,
+    REVIEW_CONFLICT,
+    APIClient,
+    APIError,
+    configured_api_url,
+    positive_id,
+)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "1", 2**63])
@@ -166,3 +173,29 @@ def test_network_error_does_not_expose_url():
         with pytest.raises(APIError, match="Нет соединения") as raised:
             client.status("llm")
     assert "private-host" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (lambda client: client.analyze(1, None), ANALYZE_CONFLICT),
+        (
+            lambda client: client.review(1, {"decision": "reject", "reviewer_id": 1}),
+            REVIEW_CONFLICT,
+        ),
+        (lambda client: client.create_record("customers", {}), "Запись уже существует"),
+    ],
+)
+def test_conflict_hint_depends_on_the_action(operation, expected):
+    """409 анализа и решения объясняет своё состояние, а не только дубликат."""
+
+    def handler(request):
+        """Вернуть конфликт с текстом, который в интерфейс не переносится."""
+        return httpx.Response(409, json={"detail": "internal detail"})
+
+    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as raised:
+            operation(client)
+    assert raised.value.status_code == 409
+    assert str(raised.value).startswith(expected)
+    assert "internal" not in str(raised.value)
