@@ -1543,7 +1543,7 @@ def tests_chart(c, w, h):
 
 
 def ci_pipeline(c, w, h):
-    """Пять заданий проходят четыре барьера: две проверки идут параллельно."""
+    """Задания проходят четыре барьера: три проверки идут параллельно."""
     jobs = [
         (
             "1. delivery",
@@ -1552,15 +1552,15 @@ def ci_pipeline(c, w, h):
             TEAL,
         ),
         (
-            "2. checks / security",
-            "uv 0.12.23, 14 дн.\nRuff, Pytest, документы\n"
-            "покрытие ≥ 85%\nоценки и pip-audit",
+            "2. checks / security / ОС",
+            "uv 0.12.23, 14 дн., Pytest\nпокрытие ≥ 85%, pip-audit\n"
+            "Linux, macOS, Windows:\nтесты и запуск API/UI",
             BLUE_L,
             BLUE,
         ),
         (
             "3. container",
-            "API + UI и Trivy\nCompose, smoke, demo\n"
+            "API + UI, Trivy, arm64\nCompose, smoke, demo\n"
             "перезапуск и журнал\nдва tested image ID",
             VIOLET_L,
             VIOLET,
@@ -2877,6 +2877,16 @@ def append_audit_pages(story, verification):
                     "Журнал",
                     "JSON-строки запросов; нет ключей smoke и демо",
                     "Секреты не попадают в логи",
+                ),
+                (
+                    "Переносимость",
+                    "Linux, macOS, Windows: uv.lock, тесты, запуск API/UI",
+                    "Проект работает на любой ОС разработчика",
+                ),
+                (
+                    "arm64",
+                    "Сборка и запуск образов под QEMU",
+                    "Apple Silicon и ARM-устройства",
                 ),
                 (
                     "Доставка",

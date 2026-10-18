@@ -24,7 +24,7 @@ IMAGES = dict(zip(delivery.LOCAL_IMAGES, (API_ID, UI_ID), strict=True))
 def git(*arguments):
     """Выполнить локальную Git-команду только во временном репозитории теста."""
     return subprocess.run(
-        ["git", *arguments], text=True, capture_output=True, check=True
+        ["git", *arguments], encoding="utf-8", capture_output=True, check=True
     ).stdout.strip()
 
 
@@ -123,7 +123,7 @@ def test_export_and_load_preserve_both_tested_image_ids(monkeypatch, tmp_path):
     monkeypatch.setattr(delivery, "command", runner)
     monkeypatch.setattr(delivery, "local_id", IMAGES.__getitem__)
     delivery.export_images(tmp_path, COMMIT)
-    metadata = json.loads((tmp_path / "tested-images.json").read_text())
+    metadata = json.loads((tmp_path / "tested-images.json").read_text(encoding="utf-8"))
     assert metadata == {"commit": COMMIT, "images": IMAGES}
     assert runner.call_args.args[-2:] == delivery.LOCAL_IMAGES
     assert runner.call_args.args[:2] == ("docker", "save")
@@ -148,7 +148,7 @@ def test_invalid_artifact_is_rejected_before_docker_load(
     monkeypatch, tmp_path, metadata
 ):
     """Чужой commit, недостающий UI и повреждённые ID блокируются до загрузки."""
-    (tmp_path / "tested-images.json").write_text(json.dumps(metadata))
+    (tmp_path / "tested-images.json").write_text(json.dumps(metadata), encoding="utf-8")
     runner = Mock()
     monkeypatch.setattr(delivery, "command", runner)
     with pytest.raises(delivery.DeliveryError):
@@ -159,7 +159,7 @@ def test_invalid_artifact_is_rejected_before_docker_load(
 def test_loaded_image_id_mismatch_blocks_publication(monkeypatch, tmp_path):
     """Исправленный metadata не скрывает подмену содержимого Docker-архива."""
     (tmp_path / "tested-images.json").write_text(
-        json.dumps({"commit": COMMIT, "images": IMAGES})
+        json.dumps({"commit": COMMIT, "images": IMAGES}), encoding="utf-8"
     )
     monkeypatch.setattr(delivery, "command", Mock())
     monkeypatch.setattr(delivery, "local_id", Mock(return_value=OTHER_ID))
@@ -431,9 +431,11 @@ def test_publication_summary_lists_both_digests(monkeypatch, tmp_path, capsys):
         {"image": "ui:v1.2.3", "digest": UI_ID, "latest": "skip"},
     ]
     delivery.write_summary(report)
-    assert "api:v1.2.3" in summary.read_text()
+    assert "api:v1.2.3" in summary.read_text(encoding="utf-8")
     assert "ui:v1.2.3" in capsys.readouterr().out
-    assert API_ID in summary.read_text() and UI_ID in summary.read_text()
+    assert API_ID in summary.read_text(encoding="utf-8") and UI_ID in summary.read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize("payload", [[], None, {"token": ""}, {"token": 4}])

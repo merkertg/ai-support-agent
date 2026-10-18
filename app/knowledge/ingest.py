@@ -17,6 +17,7 @@ from sqlalchemy import Engine, delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.console import use_utf8_output
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_engine
 from app.knowledge.config import get_knowledge_settings
 from app.knowledge.documents import SourceDocument, load_documents
@@ -149,6 +150,7 @@ def ingest(
 
 def main(argv: list[str] | None = None) -> int:
     """Прочитать каталог, выполнить индексацию и вывести JSON или ошибку."""
+    use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dir",

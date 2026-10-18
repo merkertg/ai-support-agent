@@ -7,6 +7,7 @@
 import ast
 import json
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -15,6 +16,9 @@ from urllib.parse import unquote, urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+# Полный путь из PATH: в Windows CreateProcess иначе может выбрать заглушку WSL
+# из System32 раньше bash из Git for Windows.
+BASH = shutil.which("bash")
 LINK = re.compile(r"!?\[[^\]\n]*\]\((<[^>]+>|[^\s)]+)(?:\s+\"[^\"]*\")?\)")
 
 
@@ -48,11 +52,16 @@ def check_link(path: Path, target: str, root: Path) -> str | None:
 def check_example(language: str, body: str) -> str | None:
     """Проверить Bash без исполнения и JSON без допуска синтаксических ошибок."""
     if language in {"bash", "sh", "shell"}:
+        if BASH is None:
+            return "bash не найден: установите Git for Windows или запустите в WSL"
+        # Байты UTF-8, а не текст: в Windows текстовый pipe превращает \n в \r\n,
+        # и bash -n увидел бы лишние \r, а кодировка по умолчанию там cp1252.
         result = subprocess.run(
-            ["bash", "-n"], input=body, text=True, capture_output=True, check=False
+            [BASH, "-n"], input=body.encode("utf-8"), capture_output=True, check=False
         )
         if result.returncode:
-            return f"неверный Bash: {result.stderr.strip()}"
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            return f"неверный Bash: {stderr}"
     elif language == "json":
         try:
             json.loads(body)
@@ -128,8 +137,20 @@ def inspect_project(root: Path) -> tuple[list[str], Counter]:
     return errors, counts
 
 
+def use_utf8_output() -> None:
+    """Печатать UTF-8 и при перенаправлении вывода в Windows, где по умолчанию cp1252.
+
+    Консоль Windows и так получает Unicode; меняется только поток в файл или pipe.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main() -> int:
     """Показать все замечания сразу и вернуть код ошибки для GitHub Actions."""
+    use_utf8_output()
     errors, counts = inspect_project(PROJECT_ROOT)
     print(json.dumps(dict(sorted(counts.items())), ensure_ascii=False))
     if errors:

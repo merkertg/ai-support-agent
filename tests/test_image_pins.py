@@ -9,8 +9,10 @@ DIGEST = re.compile(r"^(?P<name>[^@\s]+)@sha256:[0-9a-f]{64}$")
 REFERENCES = {
     "Dockerfile": re.compile(r"^\s*(?:FROM\s+(\S+)|COPY\s+--from=(\S+))", re.M),
     "compose.yaml": re.compile(r"^\s*image:\s*(\S+)", re.M),
-    # В CI образ сканера передаётся через переменную TRIVY_IMAGE.
-    ".github/workflows/ci.yml": re.compile(r"^\s*(?:image|TRIVY_IMAGE):\s*(\S+)", re.M),
+    # В CI образы сканера и эмулятора QEMU передаются через переменные шага.
+    ".github/workflows/ci.yml": re.compile(
+        r"^\s*(?:image|TRIVY_IMAGE|BINFMT_IMAGE):\s*(\S+)", re.M
+    ),
 }
 # Стадии многоэтапной сборки и собственные образы проекта из переменных.
 LOCAL_STAGES = {"python-base", "builder", "ui-builder"}
@@ -47,4 +49,5 @@ def test_same_image_uses_same_digest_everywhere() -> None:
         "postgres:17",
         "qdrant/qdrant:v1.19.1",
         "aquasec/trivy:0.75.0",
+        "tonistiigi/binfmt:qemu-v10.2.3",
     } <= set(by_name)

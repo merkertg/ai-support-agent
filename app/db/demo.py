@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.console import use_utf8_output
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_engine
 from app.models import Customer, License, Product
 
@@ -116,6 +117,7 @@ def show_demo() -> dict[str, dict]:
 
 def main() -> int:
     """Выбрать seed/show, вывести только JSON или безопасное сообщение ошибки."""
+    use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("seed", "show"))
     args = parser.parse_args()

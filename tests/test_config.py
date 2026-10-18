@@ -56,7 +56,9 @@ def test_environment_overrides_dotenv(
 ) -> None:
     """CI и Docker могут заменить локальный .env своей переменной окружения."""
     env_file = tmp_path / ".env"
-    env_file.write_text("DATABASE_URL=postgresql+psycopg://local@localhost/local_db\n")
+    env_file.write_text(
+        "DATABASE_URL=postgresql+psycopg://local@localhost/local_db\n", encoding="utf-8"
+    )
     monkeypatch.setenv("DATABASE_URL", VALID_URL)
     settings = Settings(_env_file=env_file)
     assert settings.database_url == VALID_URL
@@ -65,7 +67,9 @@ def test_environment_overrides_dotenv(
 def test_settings_read_dotenv_and_ignore_other_project_variables(tmp_path) -> None:
     """Файл .env читается в UTF-8, а посторонние переменные не ломают старт."""
     env_file = tmp_path / ".env"
-    env_file.write_text(f"DATABASE_URL={VALID_URL}\nPOSTGRES_USER=support\n")
+    env_file.write_text(
+        f"DATABASE_URL={VALID_URL}\nPOSTGRES_USER=support\n", encoding="utf-8"
+    )
     assert Settings(_env_file=env_file).database_url == VALID_URL
 
 

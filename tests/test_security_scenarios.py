@@ -10,7 +10,8 @@ from evaluations import agent_contract
 from evaluations.retrieval import corpus_manifest, local_index
 
 CASES = [
-    json.loads(line) for line in agent_contract.AGENT_DATASET.read_text().splitlines()
+    json.loads(line)
+    for line in agent_contract.AGENT_DATASET.read_text(encoding="utf-8").splitlines()
 ]
 
 

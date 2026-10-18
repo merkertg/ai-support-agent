@@ -28,10 +28,12 @@ def proposed(tmp_path, monkeypatch):
     root, artifact = tmp_path / "root", tmp_path / "artifact"
     root.mkdir()
     artifact.mkdir()
-    (root / "pyproject.toml").write_text(SOURCE)
-    (root / "uv.lock").write_text(LOCK)
-    (artifact / "pyproject.toml").write_text(updater.update_cutoff(SOURCE, NOW))
-    (artifact / "uv.lock").write_text(LOCK)
+    (root / "pyproject.toml").write_text(SOURCE, encoding="utf-8")
+    (root / "uv.lock").write_text(LOCK, encoding="utf-8")
+    (artifact / "pyproject.toml").write_text(
+        updater.update_cutoff(SOURCE, NOW), encoding="utf-8"
+    )
+    (artifact / "uv.lock").write_text(LOCK, encoding="utf-8")
     process = Mock()
     monkeypatch.setattr(updater.subprocess, "run", process)
     return root, artifact, process
@@ -124,16 +126,24 @@ def test_writer_rejects_unexpected_artifacts(proposed, change):
     """Нельзя внести код, новые источники, подмену файла или списка пакетов."""
     root, artifact, process = proposed
     if change == "extra":
-        (artifact / "payload.py").write_text("print('unexpected')")
+        (artifact / "payload.py").write_text("print('unexpected')", encoding="utf-8")
     elif change == "symlink":
         (artifact / "uv.lock").unlink()
-        (artifact / "uv.lock").symlink_to(root / "uv.lock")
+        try:
+            (artifact / "uv.lock").symlink_to(root / "uv.lock")
+        except OSError:
+            # Windows без прав администратора или Developer Mode не создаёт ссылки.
+            pytest.skip("символические ссылки недоступны в этой системе")
     elif change == "dependency":
         path = artifact / "pyproject.toml"
-        path.write_text(path.read_text().replace('name = "demo"', 'name = "other"'))
+        path.write_text(
+            path.read_text(encoding="utf-8").replace('name = "demo"', 'name = "other"'),
+            encoding="utf-8",
+        )
     elif change == "source":
         (artifact / "uv.lock").write_text(
-            LOCK.replace('virtual = "."', 'git = "https://evil.example/repo"')
+            LOCK.replace('virtual = "."', 'git = "https://evil.example/repo"'),
+            encoding="utf-8",
         )
     else:
         (artifact / "uv.lock").write_bytes(b" " * 10_000_001)
@@ -200,7 +210,9 @@ def test_main_change_stops_stale_proposal(proposed):
 def test_no_changes_do_not_create_commit_or_pr(proposed):
     """Если файл и дата уже актуальны, лишняя PR и CI не создаются."""
     root, artifact, _ = proposed
-    (root / "pyproject.toml").write_text((artifact / "pyproject.toml").read_text())
+    (root / "pyproject.toml").write_text(
+        (artifact / "pyproject.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     api = api_for_publish()
     updater.publish(root, artifact, BASE, NOW, api)
     assert api.request.call_count == 1

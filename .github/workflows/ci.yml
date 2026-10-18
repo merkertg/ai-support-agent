@@ -257,12 +257,81 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # Переносимость: Python-часть проекта на Linux, macOS (arm64) и Windows.
+  # Те же uv 0.12.23, Python 3.12 и uv.lock, что и в checks. Интеграционные тесты
+  # с PostgreSQL/Qdrant и Docker-образы проверяются на Linux: у macOS-runner нет
+  # Docker, а Windows-runner запускает только Windows-контейнеры.
+  portability:
+    name: Python on ${{ matrix.os }}
+    needs: delivery
+    strategy:
+      # Ошибка одной ОС не скрывает результат двух других.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      LLM_PROVIDER: mock
+      OPENAI_API_KEY: ""
+      OPENAI_MODEL: ""
+      EMBEDDING_PROVIDER: mock
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        id: dependencies
+        run: uv sync --locked
+
+      - name: Check dependency release age
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python scripts/check_dependency_age.py --min-age-days 14
+
+      # На Windows bash — это Git Bash из PATH; окончания строк LF задаёт .gitattributes.
+      - name: Check documentation and project contracts
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python scripts/check_project.py
+
+      - name: Ruff lint and format
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+
+      - name: Run unit tests
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked pytest -q -p no:cacheprovider --ignore=tests/integration
+
+      - name: Run offline evaluations
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python -m evaluations.run --output reports/evaluations.json
+
+      # Настоящие процессы Uvicorn и Streamlit на этой ОС, без БД, Docker и сети.
+      - name: Start API and operator UI locally
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python scripts/check_local_start.py --timeout 180
+
   # Этап 2. Проверяем образ только после Python CI и аудита зависимостей.
   container:
     name: Build and smoke test Docker
-    needs: [checks, security]
+    needs: [checks, security, portability]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Сборка и запуск arm64-образов под эмуляцией QEMU занимают несколько минут.
+    timeout-minutes: 30
     # Compose получает явные настройки: файла .env в CI нет.
     # Этот проект и его том изолированы от Python checks и локальной разработки.
     env:
@@ -342,10 +411,22 @@ jobs:
               -v "$PWD/reports/image-scan:/reports" \
               "$TRIVY_IMAGE" --cache-dir /cache image --quiet --scanners vuln "$@"
           }
+          # База уязвимостей скачивается отдельно с повтором: реестр иногда
+          # отвечает ограничением или обрывом, и это не должно ронять сборку.
+          for attempt in 1 2 3; do
+            if scan --download-db-only; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "База уязвимостей Trivy не скачалась за 3 попытки" >&2
+              exit 1
+            fi
+            sleep 20
+          done
           status=0
           for image in ai-support-agent:ci ai-support-agent-ui:ci; do
             name="${image%%:*}"
-            scan --format json --output "/reports/$name.json" "$image"
+            scan --skip-db-update --format json --output "/reports/$name.json" "$image"
             scan --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed \
               --exit-code 1 "$image" || status=1
           done
@@ -359,6 +440,52 @@ jobs:
           path: reports/image-scan/
           if-no-files-found: error
           retention-days: 7
+
+      # Те же Dockerfile и uv.lock для arm64: Mac на Apple Silicon, ARM-ноутбуки
+      # и серверы. Сборка и запуск идут под эмуляцией QEMU; образ проверяется
+      # на архитектуру, состав и ответ /health. Публикуются пока amd64-образы.
+      - name: Build and start arm64 images under QEMU
+        env:
+          BINFMT_IMAGE: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+        run: |
+          docker run --privileged --rm "$BINFMT_IMAGE" --install arm64
+          docker build --platform linux/arm64 --tag ai-support-agent:ci-arm64 .
+          docker build --platform linux/arm64 --target ui \
+            --tag ai-support-agent-ui:ci-arm64 .
+          docker run --rm --platform linux/arm64 --entrypoint python \
+            ai-support-agent:ci-arm64 -c '
+          import importlib.util, os, platform, shutil
+          assert platform.machine() == "aarch64", platform.machine()
+          assert os.getuid() == 10001 and shutil.which("uv") is None
+          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "ruff"))
+          import app.main
+          print("OK arm64 API image:", platform.machine())
+          '
+          docker run --rm --platform linux/arm64 --entrypoint python \
+            ai-support-agent-ui:ci-arm64 -c '
+          import importlib.util, platform
+          assert platform.machine() == "aarch64", platform.machine()
+          assert importlib.util.find_spec("app") is None
+          import streamlit
+          print("OK arm64 UI image: Streamlit", streamlit.__version__)
+          '
+          api="$(docker run --detach --platform linux/arm64 -p 127.0.0.1:18000:8000 \
+            -e RUN_RECOVERY_ENABLED=false ai-support-agent:ci-arm64)"
+          ui="$(docker run --detach --platform linux/arm64 -p 127.0.0.1:18501:8501 \
+            -e API_URL=http://127.0.0.1:9 ai-support-agent-ui:ci-arm64)"
+          trap 'docker rm --force "$api" "$ui" > /dev/null' EXIT
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:18000/health > arm64-health.json \
+              && curl --fail --silent http://127.0.0.1:18501/_stcore/health > /dev/null; then
+              python3 -c 'import json; assert json.load(open("arm64-health.json"))["status"] == "ok"'
+              echo "OK arm64: API /health и UI /_stcore/health отвечают"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$api" 2>&1 | tail -20
+          docker logs "$ui" 2>&1 | tail -20
+          exit 1
 
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
       # --no-build гарантирует использование только что собранного образа.

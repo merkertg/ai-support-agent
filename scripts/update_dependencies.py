@@ -225,8 +225,20 @@ def publish(
     print(f"PR подготовлена в {BRANCH}; CI запущен без публикации Docker-образов.")
 
 
+def use_utf8_output() -> None:
+    """Печатать UTF-8 и при перенаправлении вывода в Windows, где по умолчанию cp1252.
+
+    Консоль Windows и так получает Unicode; меняется только поток в файл или pipe.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Выбрать подготовку либо публикацию и выдать безопасную причину отказа."""
+    use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["prepare", "publish"])
     parser.add_argument(

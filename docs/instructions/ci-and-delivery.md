@@ -13,12 +13,16 @@ Validate delivery target: exact commit + strict release tag + main ancestry
                                   ↓
 Python checks: lock + age + workflow/docs + migrations + Ruff + tests/coverage ≥85% + evaluations
 Dependency audit: locked API/UI packages + current vulnerability data
-                                  ↓ both must pass
-API/UI builds + UID/tools gates + Trivy + Compose + knowledge + HTTP + persistence
+Portability: Linux, macOS, Windows — uv.lock + docs + Ruff + unit tests + real API/UI start
+                                  ↓ all three must pass
+API/UI builds + UID/tools gates + Trivy + arm64 build/start under QEMU + Compose
+  + knowledge + HTTP + persistence
   + Streamlit health/page render + demo review branches + license log leak check
                                   ↓
 Publish the same tested API and UI images to GHCR
 ```
+
+The `portability` matrix runs on `ubuntu-24.04`, `macos-15` (arm64), and `windows-2025` with the same uv, Python 3.12, and `uv.lock`: documentation checks, Ruff, all unit tests, offline evaluations, and `scripts/check_local_start.py`, which starts Uvicorn and Streamlit as real processes and checks them. Integration tests and Docker stay on Linux; arm64 images are built and started under QEMU in the container job but only amd64 images are published.
 
 The Python job installs uv **0.12.23**, requires packages in `uv.lock` to be
 at least 14 days old, validates every workflow with checksum-pinned actionlint,

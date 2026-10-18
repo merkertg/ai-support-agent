@@ -359,10 +359,11 @@ def run_smoke(
         command.append("--check-review")
     if review_run is not None:
         command.extend(["--review-run", str(review_run)])
+    # Дочерний CLI печатает UTF-8 на любой ОС; Windows по умолчанию читал бы cp1252.
     return subprocess.run(
         command,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
         timeout=5,
     )
@@ -896,5 +897,5 @@ def test_cli_review_run_continues_existing_workflow() -> None:
 def test_cli_rejects_invalid_review_run_id(value: str) -> None:
     """Неверный id запуска — ошибка аргументов с кодом 2."""
     command = [sys.executable, str(SCRIPT), "--review-run", value]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+    result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=5)
     assert result.returncode == 2

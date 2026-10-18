@@ -52,6 +52,25 @@ The global recovery monitor is disabled in ordinary test clients so tests cannot
 
 Subprocess collection uses the [official pytest-cov 7 configuration](https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html): `patch = ["subprocess"]`. Without it, CLI behavior already tested through a child interpreter would incorrectly appear unmeasured.
 
+The omit list uses `*/scripts/build_guide.py` in addition to the relative path. A child interpreter started by a test in a temporary directory resolves relative omit patterns against its own working directory; with only `scripts/build_guide.py`, that child recorded the PDF generator as an unexecuted file. This is why commit `571538c` failed in GitHub Actions at 77.13% (825 generator statements at 0%) while all 951 tests passed. The pattern with `*/` matches regardless of the working directory.
+
+## Portability checks
+
+The CI job `portability` runs on Linux, macOS, and Windows. Reproduce it on any of them:
+
+```bash
+uv run --locked python scripts/check_dependency_age.py
+uv run --locked python scripts/check_project.py
+uv run --locked pytest -q --ignore=tests/integration
+uv run --locked python scripts/check_local_start.py
+```
+
+Tests read and write files with an explicit `encoding="utf-8"` and decode child processes as UTF-8, because Windows defaults to cp1252. To catch a missing encoding on macOS or Linux, run the unit tests under a non-UTF-8 locale:
+
+```bash
+LC_ALL=en_US.ISO8859-1 PYTHONUTF8=0 uv run --locked pytest -q --ignore=tests/integration
+```
+
 If macOS shows zero coverage for the subprocess CLI despite its tests passing, inspect the coverage startup hook with `ls -lO .venv/lib/python3.12/site-packages/a1_coverage.pth`. Python skips a `.pth` file marked `hidden`. In a normal Terminal session, remove that flag before running coverage:
 
 ```bash

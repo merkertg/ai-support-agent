@@ -70,7 +70,9 @@ select = ["E", "F", "I", "UP"]
 patch = ["subprocess"]
 branch = true
 source = ["app", "operator_ui", "evaluations", "scripts"]
-omit = ["scripts/build_guide.py"]
+# Шаблон с «*/» не зависит от рабочей папки: дочерний Python, запущенный тестом
+# во временном каталоге, иначе отметил бы генератор PDF как непокрытый файл.
+omit = ["*/scripts/build_guide.py", "scripts/build_guide.py"]
 relative_files = true
 
 [tool.coverage.report]

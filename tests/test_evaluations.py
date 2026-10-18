@@ -91,7 +91,7 @@ def test_cli_writes_json_and_ignores_external_provider_environment(
     monkeypatch.setattr(socket.socket, "connect", forbid_network)
     target = tmp_path / "reports" / "evaluations.json"
     assert run.main(["--output", str(target)]) == 0
-    serialized = target.read_text()
+    serialized = target.read_text(encoding="utf-8")
     assert "must-never-be-used" not in serialized
     assert json.loads(serialized)["environment"]["real_llm"] is False
     assert "PASS" in capsys.readouterr().out
@@ -111,7 +111,7 @@ def test_cli_exits_one_and_writes_report_when_search_regresses(
     monkeypatch.setattr(KnowledgeIndex, "search", empty_search)
     target = tmp_path / "regression.json"
     assert run.main(["--output", str(target)]) == 1
-    failed = json.loads(target.read_text())
+    failed = json.loads(target.read_text(encoding="utf-8"))
     assert failed["passed"] is False
     assert failed["retrieval"]["recall_at_5"] == 0
     assert failed["agent_contract"]["passed_count"] < 12
@@ -157,11 +157,11 @@ def test_agent_threshold_rejects_even_one_security_failure(report) -> None:
 def test_invalid_labels_fail_before_any_search(tmp_path, update) -> None:
     """Нельзя принять неизвестную статью или серверную статью для чужого продукта."""
     documents, _ = corpus_manifest(DEFAULT_KNOWLEDGE_DIR)
-    lines = DEFAULT_DATASET.read_text().splitlines()
+    lines = DEFAULT_DATASET.read_text(encoding="utf-8").splitlines()
     first = json.loads(lines[0]) | update
     lines[0] = json.dumps(first)
     target = tmp_path / "cases.jsonl"
-    target.write_text("\n".join(lines))
+    target.write_text("\n".join(lines), encoding="utf-8")
     with pytest.raises(ValueError):
         load_cases(target, documents)
 
@@ -170,8 +170,8 @@ def test_duplicate_case_ids_are_rejected(tmp_path) -> None:
     """Повтор вопроса не должен незаметно увеличивать его вес в средних метриках."""
     documents, _ = corpus_manifest(DEFAULT_KNOWLEDGE_DIR)
     target = tmp_path / "cases.jsonl"
-    text = DEFAULT_DATASET.read_text()
-    target.write_text(text + text.splitlines()[0] + "\n")
+    text = DEFAULT_DATASET.read_text(encoding="utf-8")
+    target.write_text(text + text.splitlines()[0] + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="уникальными"):
         load_cases(target, documents)
 

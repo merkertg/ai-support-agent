@@ -25,7 +25,7 @@ SPEC.loader.exec_module(checks)
 def test_missing_nested_and_async_explanations(tmp_path, source, missing):
     """Нельзя спрятать функцию без пояснения внутри другой функции или класса."""
     path = tmp_path / "sample.py"
-    path.write_text(source)
+    path.write_text(source, encoding="utf-8")
     errors = checks.check_python(path)
     assert len(errors) == 1
     assert missing in errors[0]
@@ -44,7 +44,7 @@ def test_missing_nested_and_async_explanations(tmp_path, source, missing):
 def test_invalid_documentation_fails(tmp_path, body, expected):
     """Повреждённые ссылки, код и ограждения блокируют CI с понятным сообщением."""
     path = tmp_path / "guide.md"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     errors, _ = checks.check_markdown(path, tmp_path)
     assert len(errors) == 1
     assert expected in errors[0]
@@ -53,14 +53,15 @@ def test_invalid_documentation_fails(tmp_path, body, expected):
 def test_fences_links_and_bash_are_checked_without_execution(tmp_path):
     """Пример Bash не исполняется, а текст внутри вложенного ограждения игнорируется."""
     marker = tmp_path / "must-not-exist"
-    (tmp_path / "other file.md").write_text("# Цель\n")
+    (tmp_path / "other file.md").write_text("# Цель\n", encoding="utf-8")
     path = tmp_path / "guide.md"
     path.write_text(
         f"```bash\ntouch '{marker}'\n```\n"
         '```json\n{"ok": true}\n```\n'
         "````markdown\n```bash\nif broken\n```\n[нет](absent.md)\n````\n"
         "[Локально](<other file.md>) [Сеть](https://example.org/no-fetch)\n"
-        "[Якорь](#цель) `[Не ссылка](missing.md)`\n"
+        "[Якорь](#цель) `[Не ссылка](missing.md)`\n",
+        encoding="utf-8",
     )
     errors, counts = checks.check_markdown(path, tmp_path)
     assert errors == []

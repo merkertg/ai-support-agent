@@ -1,0 +1,9 @@
+# Одинаковые окончания строк на Linux, macOS и Windows. CRLF ломает bash -n
+# в примерах документации, контрольные суммы статей базы знаний и ruff format.
+* text=auto eol=lf
+
+# Двоичные файлы не преобразуются.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary

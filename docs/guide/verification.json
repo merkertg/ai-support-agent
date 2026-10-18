@@ -1,9 +1,9 @@
 {
   "checked_at": "2026-10-18",
-  "base_commit": "2d585fa",
+  "base_commit": "571538c",
   "tests": {
-    "total": 951,
-    "unit": 819,
+    "total": 955,
+    "unit": 823,
     "integration": 132,
     "smoke_cli": 89,
     "skipped": 0
@@ -11,7 +11,7 @@
   "checks": [
     {
       "name": "Код и комментарии",
-      "result": "Ruff без замечаний; 117 файлов Python; 1253 функций/классов с docstrings."
+      "result": "Ruff без замечаний; 120 файлов Python; 1278 функций/классов с docstrings."
     },
     {
       "name": "Инструкции",
@@ -19,7 +19,11 @@
     },
     {
       "name": "Покрытие",
-      "result": "90.97% строк и ветвей вместе, порог 85%; subprocess CLI учтены. XML, JSON, HTML."
+      "result": "Linux, как в CI: 90.19% при пороге 85%; на 571538c было 77.13%."
+    },
+    {
+      "name": "ОС и архитектуры",
+      "result": "CI: Linux, macOS, Windows и запуск API/UI; arm64 под QEMU, amd64 проверен локально."
     },
     {
       "name": "Workflow",
@@ -59,17 +63,16 @@
     }
   ],
   "remote_ci": {
-    "status": "not_verified",
-    "commit": null,
-    "previous_passed_commit": "061c2a70930ad435d898ccc38fc612d97cbe6128",
-    "detail": "Удалённый запуск итогового коммита этого продолжения не подтверждён: API закрытого репозитория вернул 404. После push проверь 5 заданий и два digest API/UI. Последний подтверждённый пользователем успех - 061c2a7, 18.10.2026 (тогда 4 задания)."
+    "status": "failed",
+    "commit": "571538c9852133a8f5288565a86cca9393cce1fb",
+    "detail": "571538c: Python checks упал на покрытии 77.13% при 951 зелёном тесте. Исправлено; новый запуск, включая macOS и Windows, не подтверждён."
   },
   "changes": [
+    "Исправлен порог покрытия в CI: генератор PDF больше не попадает в отчёт из дочернего процесса.",
+    "Добавлено задание portability: Linux, macOS и Windows с проверкой настоящего запуска API и UI.",
+    "UTF-8 в тестах и командных скриптах, LF в .gitattributes; arm64-образы собираются в CI под QEMU.",
     "uv 0.12.23 проверен на текущем lock и закреплён в CI/Docker вместо слишком свежего выпуска.",
-    "CI требует 85% покрытия; итог 90.97%, учтены дочерние CLI-процессы, отчёты сохраняются.",
-    "Брошенные running автоматически завершаются; гонки не затирают успех и не создают поздний черновик.",
-    "Публикация двух tested-образов и стабильных версий учитывает OCI index, конфликты и защиту latest.",
-    "Еженедельные PR обновляют зависимости с окном 14 дней; dev-стенд и руководство обновлены."
+    "CI требует 85% покрытия; итог 90.97%, учтены дочерние CLI-процессы, отчёты сохраняются."
   ],
   "remaining": [
     "Подтвердить новый Actions: 5 зелёных заданий, API/UI digest; проверить первый PR обновления и права Actions.",
@@ -86,14 +89,14 @@
     "agent_total": 12
   },
   "coverage": {
-    "combined_percent": 90.97,
-    "line_percent": 92.72,
-    "branch_percent": 83.81,
+    "combined_percent": 90.19,
+    "line_percent": 92.18,
+    "branch_percent": 82.13,
     "minimum_combined_percent": 85,
-    "covered_lines": 4009,
-    "statements": 4324,
-    "covered_branches": 885,
-    "branches": 1056,
+    "covered_lines": 4137,
+    "statements": 4488,
+    "covered_branches": 910,
+    "branches": 1108,
     "subprocess": true
   }
 }

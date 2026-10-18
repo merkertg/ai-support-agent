@@ -6,6 +6,7 @@ import platform
 import sys
 from pathlib import Path
 
+from app.console import use_utf8_output
 from app.knowledge.config import DEFAULT_KNOWLEDGE_DIR
 from app.knowledge.errors import KnowledgeError
 from evaluations.agent_contract import AGENT_DATASET, evaluate_agent_contract
@@ -151,6 +152,7 @@ def readable_summary(report: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """Записать JSON и вернуть 0 при успехе, 1 при регрессии, 2 при неверном наборе."""
+    use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("reports/evaluations.json"))
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)

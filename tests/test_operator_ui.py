@@ -567,9 +567,10 @@ def test_entrypoint_imports_package_outside_project_directory(tmp_path):
         [sys.executable, "-I", "-c", code],
         cwd=tmp_path,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().endswith("operator_ui/app.py")
+    # Сравниваем части пути: в Windows разделитель — обратная косая черта.
+    assert Path(result.stdout.strip()).parts[-2:] == ("operator_ui", "app.py")

@@ -8,9 +8,41 @@ Install the tools, start the Compose stack with the operator interface, index th
 
 - Python 3.12 or newer.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency and environment management.
-- Docker with the `docker compose` command; start Docker Desktop on this Mac.
+- Docker with the `docker compose` command: Docker Desktop on macOS and Windows, Docker Engine or Desktop on Linux.
 
 Run all commands from the project root, the directory containing `pyproject.toml`.
+
+## Supported platforms
+
+| | Linux | macOS (Intel, Apple Silicon) | Windows 10/11 |
+| --- | --- | --- | --- |
+| Compose stack | Docker Engine or Desktop | Docker Desktop | Docker Desktop with the WSL 2 backend |
+| Image architecture | amd64 or arm64, built locally | arm64 on Apple Silicon, amd64 on Intel | amd64 (arm64 on ARM laptops) |
+| Python on the host | `uv sync --locked`, Python 3.12 | same | same |
+| Shell for the guides | Bash | Bash or zsh | Git Bash or WSL; PowerShell commands below |
+
+CI checks every push on all three systems (`Python on ubuntu-24.04`, `macos-15`, `windows-2025`): the same `uv.lock` installs, documentation checks, Ruff, unit tests, offline evaluations, and a real start of the API and UI. Docker images are built and smoke-tested for amd64 and, under emulation, for arm64. Integration tests with PostgreSQL and Qdrant run on Linux.
+
+Check your own computer without Docker, a database, or keys:
+
+```bash
+uv sync --locked
+uv run --locked python scripts/check_local_start.py
+```
+
+The script starts Uvicorn and Streamlit as separate processes on free local ports from a temporary folder (so your `.env` is not read), checks `/health`, a JSON 503 from `/ready` without a database, the `X-Request-ID` header, the Streamlit server, and renders the operator page against the running API, then stops both processes. `Локальный запуск API и UI: OK` is printed on success.
+
+On Windows in PowerShell, the stack starts with:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+uv sync --locked
+docker compose up --build --detach --wait --wait-timeout 180 ui
+docker compose exec -T api python -m app.knowledge.ingest
+uv run --locked python scripts/check_local_start.py
+```
+
+The repository stores text files with LF line endings (`.gitattributes`), so Windows checkouts do not get CRLF in shell examples, Markdown articles, or Python files. A working copy cloned before this rule may still contain CRLF; re-create it with `git rm --cached -r .` followed by `git reset --hard`. Command-line scripts write UTF-8 even when Windows redirects their output to a file or pipe.
 
 ## Start the stack
 

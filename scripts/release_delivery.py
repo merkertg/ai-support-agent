@@ -48,7 +48,9 @@ class NoRedirect(HTTPRedirectHandler):
 
 def command(*arguments: str) -> str:
     """Выполнить команду без shell и вернуть stdout, сохранив stderr в job log."""
-    result = subprocess.run(arguments, text=True, stdout=subprocess.PIPE, check=True)
+    result = subprocess.run(
+        arguments, encoding="utf-8", stdout=subprocess.PIPE, check=True
+    )
     return result.stdout.strip()
 
 
@@ -333,8 +335,20 @@ def write_summary(report: list[dict[str, str]]) -> None:
             stream.write(result)
 
 
+def use_utf8_output() -> None:
+    """Печатать UTF-8 и при перенаправлении вывода в Windows, где по умолчанию cp1252.
+
+    Консоль Windows и так получает Unicode; меняется только поток в файл или pipe.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main() -> int:
     """Запустить один этап workflow и вернуть безопасное сообщение при ошибке."""
+    use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("validate", "export", "publish"))
     parser.add_argument("--directory", type=Path, default=Path("image-artifact"))
