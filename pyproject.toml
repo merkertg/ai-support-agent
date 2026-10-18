@@ -28,6 +28,7 @@ ui = ["streamlit==1.65.0", "httpx"]
 dev = [
     {include-group = "ui"},  # Обычный uv sync готовит также тесты интерфейса.
     "httpx",   # HTTP-клиент, который также использует наш TestClient.
+    "pytest-cov>=7.1,<8",  # Покрытие строк и ветвей полного набора тестов.
     "pytest",  # Находит и запускает автоматические тесты.
     "ruff",    # Проверяет код и его форматирование.
 ]
@@ -61,3 +62,27 @@ line-length = 88
 # E — стиль, F — ошибки кода, I — порядок импортов, UP — современный Python.
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+# Измеряем исполняемую логику приложения, UI, оценок и CLI; макет PDF проверяется
+# рендером, поэтому визуальный генератор не включён в числовой порог тестов.
+[tool.coverage.run]
+# Smoke CLI запускается дочерним Python: его покрытие объединяется с Pytest.
+patch = ["subprocess"]
+branch = true
+source = ["app", "operator_ui", "evaluations", "scripts"]
+omit = ["scripts/build_guide.py"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 85
+precision = 2
+show_missing = true
+
+[tool.coverage.xml]
+output = "reports/coverage.xml"
+
+[tool.coverage.json]
+output = "reports/coverage.json"
+
+[tool.coverage.html]
+directory = "reports/coverage-html"

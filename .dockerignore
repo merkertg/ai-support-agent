@@ -25,6 +25,7 @@ evaluations/
 scripts/
 docs/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 build/
@@ -34,3 +35,6 @@ dist/
 # Локальный Compose-стенд и отчёты не нужны при сборке образа.
 compose.yaml
 reports/
+
+# Локальный архив двух образов для проверки передачи между CI jobs.
+image-artifact/

@@ -1,0 +1,87 @@
+# Подготовка еженедельной PR: main меняется только после обычного review и CI.
+name: Update Python dependencies
+
+on:
+  schedule:
+    # Понедельник 06:17 UTC = 11:17 в Ташкенте.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-dependency-updates
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare lock after 14-day release window
+    # Fork и запуск с чужой ветки не получают возможность готовить нашу PR.
+    if: github.repository == 'merkertg/ai-support-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install mature uv release and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+
+      # Здесь нет write-токена и не устанавливаются зависимости приложения.
+      - name: Refresh cutoff and lock without package builds
+        run: uv run --no-project --python 3.12 python scripts/update_dependencies.py prepare
+
+      - name: Upload only the proposed dependency files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: proposed-python-dependencies
+          path: |
+            pyproject.toml
+            uv.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Open dependency PR and start CI
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      # Явный workflow_dispatch запускает CI без нового секрета PAT/App.
+      actions: write
+    steps:
+      # Код всегда берётся из той же доверенной main, никогда из PR-ветки.
+      - name: Checkout trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download proposed dependency files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: proposed-python-dependencies
+          path: ${{ runner.temp }}/proposed-python-dependencies
+
+      # Python 3.12 и tomllib входят в ubuntu-24.04; pip/uv здесь не запускаются.
+      - name: Validate files, open PR and dispatch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_DIR: ${{ runner.temp }}/proposed-python-dependencies
+          TRUSTED_BASE_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/update_dependencies.py publish \
+            --artifact "$ARTIFACT_DIR" --base-sha "$TRUSTED_BASE_SHA"

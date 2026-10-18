@@ -603,10 +603,12 @@ def cover_page(c, doc):
         "19  Путь оператора",
         "20  Перезапуск",
         "21  Диагностика",
-        "22  Следующие шаги",
+        "22  Покрытие и recovery",
+        "23  Обновления и релизы",
+        "24  Следующие шаги",
     ]
     for index, item in enumerate(contents):
-        column, row = divmod(index, 11)
+        column, row = divmod(index, 12)
         c.drawString(MARGIN + column * 250, 282 - row * 15, item)
     c.setStrokeColor(HEX("#334155"))
     c.line(MARGIN, 82, PAGE_W - MARGIN, 82)
@@ -1541,36 +1543,42 @@ def tests_chart(c, w, h):
 
 
 def ci_pipeline(c, w, h):
-    """Три последовательных барьера из четырёх заданий GitHub Actions."""
+    """Пять заданий проходят четыре барьера: две проверки идут параллельно."""
     jobs = [
         (
-            "1. checks + security",
-            "lock и возраст ≥ 14 дн.\nRuff, документы, Pytest\n"
-            "оценки поиска и агента\nactionlint и pip-audit (API + UI)",
+            "1. delivery",
+            "проверить цель\nстрогий vX.Y.Z\nтег из истории main",
+            TEAL_L,
+            TEAL,
+        ),
+        (
+            "2. checks / security",
+            "uv 0.12.23, 14 дн.\nRuff, Pytest, документы\n"
+            "покрытие ≥ 85%\nоценки и pip-audit",
             BLUE_L,
             BLUE,
         ),
         (
-            "2. Docker + smoke",
-            "образы API и UI + Trivy\nCompose, --check-review\n"
-            "пересоздание: данные живы\nUI, демо, журнал без ключей",
+            "3. container",
+            "API + UI и Trivy\nCompose, smoke, demo\n"
+            "перезапуск и журнал\nдва tested image ID",
             VIOLET_L,
             VIOLET,
         ),
         (
-            "3. Публикация в GHCR",
-            "только push в main\nтот же проверенный образ\nтег sha-<коммит>\nи latest",
+            "4. publish",
+            "API + UI в GHCR\nmain: SHA и latest\nтег: vX.Y.Z\nбез новой сборки",
             GREEN_L,
             GREEN,
         ),
     ]
-    gap = 24
-    bw = (w - gap * 2) / 3
+    gap = 12
+    bw = (w - gap * 3) / 4
     for index, (title, text, fill, edge) in enumerate(jobs):
         x = index * (bw + gap)
-        node(c, x, 4, bw, h - 8, title, text, fill, edge, tsize=10, ssize=8)
+        node(c, x, 4, bw, h - 8, title, text, fill, edge, tsize=9, ssize=7.6)
         if index:
-            arrow(c, x - gap + 3, h / 2, x - 3, h / 2, MUTED, label="успех")
+            arrow(c, x - gap + 2, h / 2, x - 2, h / 2, MUTED, head=4)
 
 
 def ui_flow(c, w, h):
@@ -2282,7 +2290,7 @@ def build_story(verification):
         story,
         "9",
         "Как запустить у себя",
-        "Нужны Python 3.12+, uv и Docker Desktop. Команды - из корня проекта.",
+        "Нужны Python 3.12+, uv 0.12.23 и Docker Desktop. Команды - из корня проекта.",
         TEAL,
     )
     for number, title, command, note in [
@@ -2391,7 +2399,7 @@ def build_story(verification):
         "10",
         "Проверки качества и CI/CD",
         "Каждое изменение проверяется автоматически, прежде "
-        "чем образ попадёт в реестр.",
+        "чем API и UI попадут в реестр.",
         BLUE,
     )
     story += [
@@ -2667,7 +2675,7 @@ def build_story(verification):
         ),
         ("Human in the loop", "Шаг, где решение принимает человек, а не модель."),
         ("Smoke-тест", "Быстрая проверка, что запущенная система отвечает как надо."),
-        ("CI/CD, GHCR", "Автопроверки на GitHub и публикация Docker-образа в реестр."),
+        ("CI/CD, GHCR", "Автопроверки на GitHub и публикация образов API/UI в реестр."),
         ("Streamlit", "Библиотека Python для веб-интерфейса из обычного скрипта."),
         (
             "Recall@5 / MRR",
@@ -2727,7 +2735,7 @@ def evidence_table(headers, rows, widths):
 
 
 def append_audit_pages(story, verification):
-    """Добавить восемь практических разделов после исходного наглядного гайда."""
+    """Добавить десять практических разделов после исходного наглядного гайда."""
     tests = verification["tests"]
     section(
         story,
@@ -2743,7 +2751,7 @@ def append_audit_pages(story, verification):
             'Исходный коммит: <font name="Mono">'
             f"{escape(verification['base_commit'])}</font>. "
             "Проверяются приложение, миграции, поиск, процесс "
-            "решения, образ и документация."
+            "решения, образы API/UI и документация."
         ),
         Spacer(1, 9),
         evidence_table(
@@ -2788,7 +2796,7 @@ def append_audit_pages(story, verification):
         "16",
         "CI: матрица проверок",
         "Каждый push в main проходит последовательные барьеры "
-        "перед публикацией образа.",
+        "перед публикацией двух образов.",
         BLUE,
     )
     story += [
@@ -2797,8 +2805,17 @@ def append_audit_pages(story, verification):
             [
                 ("Локальный git commit", "Не запускаются на GitHub", "Нет"),
                 ("Push в main", "Все обязательные задания", "После успеха"),
-                ("PR с целью main", "checks + security → container", "Нет"),
-                ("Run workflow вручную", "checks + security → container", "Нет"),
+                (
+                    "Push vX.Y.Z из main",
+                    "Все пять заданий; проверка истории",
+                    "Версия API/UI",
+                ),
+                ("PR с целью main", "delivery → checks/security → container", "Нет"),
+                (
+                    "Run workflow вручную",
+                    "delivery → checks/security → container",
+                    "Нет",
+                ),
             ],
             [150, 230, W - 380],
         ),
@@ -2807,24 +2824,24 @@ def append_audit_pages(story, verification):
             ["Барьер", "Что проверяется", "Зачем"],
             [
                 (
+                    "delivery",
+                    "Строгий vX.Y.Z; commit достижим из origin/main",
+                    "Нельзя выпустить стороннюю ветку",
+                ),
+                (
                     "Зависимости",
-                    "uv sync --locked; возраст ≥ 14 дн.; pip-audit 2.10.1",
+                    "uv 0.12.23; lock; возраст ≥ 14 дн.; pip-audit",
                     "Нет слишком свежих и известных уязвимых выпусков",
                 ),
                 (
                     "checks: код и документы",
-                    "Ruff, формат, check_project.py",
+                    "Ruff, формат, документы, actionlint всех workflow",
                     "Ошибки кода, комментарии, ссылки",
                 ),
                 (
-                    "Workflow",
-                    "YAML, выражения и задания через actionlint",
-                    "Ошибки задания до запуска на GitHub",
-                ),
-                (
                     "PostgreSQL + Qdrant",
-                    "Миграции, alembic check, весь Pytest",
-                    "Реальная схема, данные и поиск",
+                    "Миграции, alembic check, Pytest; coverage ≥ 85%",
+                    "Схема, поиск, строки и ветви кода",
                 ),
                 (
                     "Оценки",
@@ -2863,7 +2880,7 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Доставка",
-                    "Загрузить тот же образ; сверить ID",
+                    "Загрузить оба tested образа; сверить оба ID",
                     "Публикуется проверенная сборка",
                 ),
             ],
@@ -2876,12 +2893,11 @@ def append_audit_pages(story, verification):
             "publish ожидаем. Полный состав шагов определяет .github/workflows/ci.yml."
         ),
         Spacer(1, 8),
-        p("Один образ на весь путь", H2),
+        p("Два проверенных образа на весь путь", H2),
         p(
-            "container собирает образ и проверяет его. В publish "
-            "передаются архив и сохранённый "
-            "image ID; после загрузки ID сравнивается. Повторной "
-            "сборки перед GHCR нет. "
+            "container собирает и проверяет API и UI. В publish передаются "
+            "tested-images.tar и JSON с SHA коммита и двумя image ID; после "
+            "загрузки проверяются оба ID. Повторной сборки перед GHCR нет. "
             "Это защищает от ситуации, когда тестируется одна "
             "сборка, а доставляется другая.",
             BODY_S,
@@ -2893,7 +2909,7 @@ def append_audit_pages(story, verification):
         "17",
         "Защита и доставка",
         "Технические ограничения проекта, права GitHub и "
-        "воспроизводимая версия образа.",
+        "воспроизводимые версии двух образов.",
         VIOLET,
     )
     story += [
@@ -2902,7 +2918,7 @@ def append_audit_pages(story, verification):
             [
                 (
                     "Права GitHub",
-                    "contents: read по умолчанию; packages: write только в publish",
+                    "CI: contents: read; packages: write только в publish",
                 ),
                 (
                     "Внешние Actions",
@@ -2934,12 +2950,13 @@ def append_audit_pages(story, verification):
                     "JSON с X-Request-ID; без query string, SQL, тел запросов и ключей",
                 ),
                 (
-                    "Публикация",
-                    "Только успешный push в main; SHA-тег для каждого коммита",
+                    "Публикация API/UI",
+                    "Успешный main: sha-<полный SHA>; latest только для вершины main",
                 ),
                 (
-                    "Тег latest",
-                    "Обновляется, только если публикуемый SHA всё ещё вершина main",
+                    "Версия vX.Y.Z",
+                    "Push тега из истории main; конфликт образа запрещён; "
+                    "latest не меняется",
                 ),
             ],
             [130, W - 130],
@@ -2957,8 +2974,10 @@ def append_audit_pages(story, verification):
         code_block(
             'read -r -p "Полный SHA из Summary: " IMAGE_SHA\n'
             'export APP_IMAGE="ghcr.io/merkertg/ai-support-agent:sha-$IMAGE_SHA"\n'
+            'export UI_IMAGE="ghcr.io/merkertg/ai-support-agent-ui:sha-$IMAGE_SHA"\n'
             'docker pull "$APP_IMAGE"\n'
-            "docker compose up --detach --no-build --wait api"
+            'docker pull "$UI_IMAGE"\n'
+            "docker compose up --detach --no-build --wait ui"
         ),
         Spacer(1, 9),
         callout(
@@ -3011,13 +3030,15 @@ def append_audit_pages(story, verification):
             "export TEST_DATABASE_URL='postgresql+psycopg://support:'\\\n"
             "'support_ci@127.0.0.1:5434/ai_support_test'\n"
             "export TEST_QDRANT_URL=http://127.0.0.1:6336\n"
-            "CI=true uv run --locked pytest -v\n"
+            "CI=true uv run --locked pytest --cov \\\n"
+            "  --cov-report=term-missing:skip-covered \\\n"
+            "  --cov-report=xml --cov-report=json --cov-report=html\n"
             "unset TEST_DATABASE_URL TEST_QDRANT_URL"
         ),
         Spacer(1, 8),
         p("4. Проверить собранный стенд через HTTP", H2),
         code_block(
-            "docker compose up --build --detach --wait api\n"
+            "docker compose up --build --detach --wait --wait-timeout 180 ui\n"
             "docker compose exec -T api python -m app.knowledge.ingest\n"
             "docker compose exec -T api python -m alembic check\n"
             "uv run --locked python scripts/smoke_test.py \\\n"
@@ -3163,7 +3184,7 @@ def append_audit_pages(story, verification):
             "docker compose exec -T api python -m app.db.demo seed \\\n"
             "  > /tmp/ai-support-before.json\n"
             "docker compose down\n"
-            "docker compose up --detach --no-build --wait api\n"
+            "docker compose up --detach --no-build --wait ui\n"
             "docker compose exec -T api python -m app.db.demo show \\\n"
             "  > /tmp/ai-support-after.json\n"
             "cmp /tmp/ai-support-before.json /tmp/ai-support-after.json"
@@ -3206,7 +3227,8 @@ def append_audit_pages(story, verification):
             "тома. Параметр --volumes "
             "удаляет данные и применяется CI только к своему изолированному проекту. "
             "Сохранение тома не заменяет резервное копирование. Автоматический backup "
-            "и восстановление аварийно зависших running пока не реализованы.",
+            "пока не настроен. Брошенные running завершаются автоматически: "
+            "порог 180 секунд, таймер 30 секунд; подробности - в разделе 22.",
             GREEN,
             GREEN_L,
         ),
@@ -3320,6 +3342,167 @@ def append_audit_pages(story, verification):
     section(
         story,
         "22",
+        "Покрытие и восстановление",
+        "Как повторить порог качества и что произойдёт после остановки worker.",
+        TEAL,
+    )
+    story += [
+        p("1. Выполнить полный прогон с покрытием", H2),
+        p(
+            "Сначала подними db-test/qdrant-test и задай TEST URLs из раздела 18. "
+            "Один полный запуск проверяет приложение, UI, оценки и CLI:",
+            BODY_S,
+        ),
+        code_block(
+            "CI=true uv run --locked pytest --cov \\\n"
+            "  --cov-report=term-missing:skip-covered \\\n"
+            "  --cov-report=xml --cov-report=json --cov-report=html"
+        ),
+        Spacer(1, 7),
+        p(
+            "Порог <b>85%</b> задаётся в pyproject.toml: это общий показатель строк "
+            "и ветвей, а не отдельный порог каждого файла. patch=subprocess "
+            "объединяет дочерние Python-процессы smoke с Pytest. Макет PDF исключён "
+            "из числового покрытия: он проверяется рендером. Недобор даёт код 1 "
+            "и блокирует container/publish даже при зелёных assertions.",
+            BODY_S,
+        ),
+        Spacer(1, 7),
+        evidence_table(
+            ["Отчёт", "Где смотреть"],
+            [
+                ("coverage.xml / coverage.json", "reports/: машинные результаты"),
+                ("coverage-html/index.html", "reports/: строки и ветви по файлам"),
+                ("Артефакт coverage-report", "GitHub Actions: XML, JSON, HTML; 7 дней"),
+            ],
+            [180, W - 180],
+        ),
+        Spacer(1, 10),
+        p("2. Проверить восстановление брошенного запуска", H2),
+        p(
+            "Сервер сохраняет running до вызова агента. После сбоя процесса "
+            "монитор каждые <b>30 секунд</b> переводит только running возрастом "
+            "<b>не менее 180 секунд</b> в failed. Время берётся из PostgreSQL: "
+            "120 секунд максимального лимита плюс запас 60. Перед новым анализом "
+            "того же обращения действует та же проверка.",
+            BODY_S,
+        ),
+        Spacer(1, 6),
+        code_block(
+            "docker compose logs --since 10m api\n"
+            'read -r -p "ID проверяемого запуска: " RUN_ID\n'
+            "curl --fail-with-body \\\n"
+            '  "http://127.0.0.1:8001/api/agent-runs/$RUN_ID"'
+        ),
+        Spacer(1, 7),
+        p(
+            "Ищи событие agent_run_recovered и статус failed с finished_at. "
+            "Recovery не создаёт предложение и не отправляет ответ; сохранённый "
+            "прогресс остаётся. Поздний worker получает 409 и не оживляет failed. "
+            "Успевший completed и его pending сохраняются. Ошибка БД откатывает "
+            "проход; таймер повторит попытку. Проверки гонок выполняются только "
+            "в тестовой БД, рабочий процесс для демонстрации не останавливай.",
+            BODY_S,
+        ),
+        Spacer(1, 7),
+        callout(
+            "RUN_RECOVERY_ENABLED=false отключает таймер, но сохраняет проверку "
+            "перед анализом. SQL ограничен statement_timeout=3s и lock_timeout=1s; "
+            "занятая БД может задержать проход. Инструкция: docs/RUN_RECOVERY.md.",
+            TEAL,
+            TEAL_L,
+        ),
+    ]
+
+    section(
+        story,
+        "23",
+        "Обновления и версии релизов",
+        "Как получить проверяемую PR зависимостей и опубликовать выбранную версию.",
+        VIOLET,
+    )
+    story += [
+        p("1. Еженедельная PR зависимостей", H2),
+        p(
+            "Update Python dependencies запускается по понедельникам в "
+            "<b>06:17 UTC / 11:17 Ташкент</b> или вручную только из main. "
+            "prepare без write-токена сдвигает exclude-newer до полуночи UTC "
+            "за 14 суток и выполняет uv lock --upgrade --no-build. Age check "
+            "повторно проверяет upload-time всех пакетов.",
+            BODY_S,
+        ),
+        Spacer(1, 6),
+        evidence_table(
+            ["Шаг", "Ожидаемый результат"],
+            [
+                ("prepare → publish", "Только pyproject.toml и uv.lock; код из main"),
+                (
+                    "Bot-ветка",
+                    "automation/python-dependencies: одна PR, без автослияния",
+                ),
+                (
+                    "Отдельный dispatch CI",
+                    "Обычные проверки этой ветки; GHCR не публикуется",
+                ),
+                (
+                    "После review и зелёного CI",
+                    "Человек сливает PR; main запускает полный CI/CD",
+                ),
+            ],
+            [150, W - 150],
+        ),
+        Spacer(1, 7),
+        p(
+            "uv 0.12.23 опубликован 03.10.2026; совместимость актуального lock "
+            "проверена. Оба builder используют его закреплённый digest. Точные "
+            "ограничения вроде streamlit==1.65.0 сохраняются. Docker digest, "
+            "Actions SHA и диапазоны пакетов пересматриваются отдельно. "
+            "HTTP 403 при создании PR требует разрешения в настройках Actions; "
+            "PAT для обхода скрипт не подставляет. Политика и разбор ошибок: "
+            "docs/DEPENDENCY_UPDATES.md.",
+            BODY_S,
+        ),
+        Spacer(1, 10),
+        p("2. Выбрать стабильную версию vX.Y.Z", H2),
+        p(
+            "Версию выбирает человек после просмотра успешного CI нужного SHA. "
+            "Тег должен указывать на commit из истории origin/main; development- "
+            "и PR-ветки не выпускаются. Разрешён строгий vMAJOR.MINOR.PATCH, "
+            "без суффиксов и ведущих нулей. Команды ниже выполняют явный релиз:",
+            BODY_S,
+        ),
+        code_block(
+            "set -e\n"
+            "git fetch origin main --tags\n"
+            'read -r -p "Проверенный полный SHA из main: " RELEASE_SHA\n'
+            'read -r -p "Выбранный тег vX.Y.Z: " RELEASE_VERSION\n'
+            'git merge-base --is-ancestor "$RELEASE_SHA" origin/main\n'
+            'git tag -a "$RELEASE_VERSION" "$RELEASE_SHA" -m "$RELEASE_VERSION"\n'
+            'git push origin "refs/tags/$RELEASE_VERSION"'
+        ),
+        Spacer(1, 7),
+        p(
+            "Push тега запускает пять jobs: delivery → checks/security → "
+            "container → publish. Оба API/UI образа проходят проверки и "
+            "получают тот же vX.Y.Z; повторной сборки в publish нет. Существующий "
+            "version-тег с другим image ID останавливает доставку. Повтор "
+            "идентичного образа разрешён. Релиз не двигает latest; main публикует "
+            "sha-&lt;полный SHA&gt; и latest только для своей текущей вершины.",
+            BODY_S,
+        ),
+        Spacer(1, 7),
+        callout(
+            "CI настраивает доставку, но локальная проверка не доказывает результат "
+            "GitHub. Подтверди пять jobs итогового коммита и оба пакета GHCR в "
+            "Actions Summary. Тег и GitHub Release автоматически не создаются.",
+            VIOLET,
+            VIOLET_L,
+        ),
+    ]
+
+    section(
+        story,
+        "24",
         "Что делать дальше",
         "Десять этапов готовы; дальше - реальная модель, доступ и эксплуатация.",
         BLUE,
@@ -3347,8 +3530,8 @@ def append_audit_pages(story, verification):
                     "тест отказа внешнего сервиса",
                 ),
                 (
-                    "Образ UI в GHCR",
-                    "Второй пакет реестра и шаг publish после проверки прав",
+                    "Подтвердить удалённый CI",
+                    "Пять успешных jobs итогового SHA и оба API/UI пакета GHCR",
                 ),
                 (
                     "Внешний сервер",

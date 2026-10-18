@@ -85,6 +85,8 @@ services:
       LANGSMITH_TRACING: "false"
       # Журнал приложения: JSON в stdout, смотреть через docker compose logs api.
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Старые running-запуски завершаются безопасным фоновым восстановлением.
+      RUN_RECOVERY_ENABLED: ${RUN_RECOVERY_ENABLED:-true}
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:

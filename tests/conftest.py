@@ -10,6 +10,16 @@ from app.api.reviews import get_checkpointer_factory
 
 
 @pytest.fixture(autouse=True)
+def disable_background_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Не позволить длительному TestClient обратиться к development-БД по таймеру.
+
+    Проверки самого монитора явно включают его и подменяют SQL-проход. PG
+    интеграции вызывают recovery с движком из проверенного TEST_DATABASE_URL.
+    """
+    monkeypatch.setenv("RUN_RECOVERY_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def memory_checkpointer() -> Iterator[InMemorySaver]:
     """Подставить checkpointer в памяти процесса для каждого теста.
 

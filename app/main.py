@@ -36,6 +36,7 @@ from app.observability import (
 )
 from app.services.agents import AgentRunFailure
 from app.services.errors import ResourceError
+from app.services.run_recovery import recovery_monitor
 from app.workflow.checkpoint import close_checkpointer
 
 # Путь не зависит от каталога, из которого запущен Uvicorn.
@@ -49,13 +50,15 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Освободить пул PostgreSQL после остановки HTTP-приложения.
 
     При старте не открываем соединения и не создаём таблицы: за изменение
-    схемы отвечает явный запуск Alembic, локально или в сервисе migrations.
+    схемы отвечает явный запуск Alembic. Фоновый монитор через 30 секунд
+    завершает брошенные running-запуски; перед закрытием пула ждём его остановки.
     Журнал настраивается здесь: импорт модуля в тестах не меняет вывод.
     """
     configure_logging()
     log_event(logger, logging.INFO, "api_started", version=application.version)
     try:
-        yield
+        async with recovery_monitor():
+            yield
     finally:
         dispose_engine()
         close_checkpointer()

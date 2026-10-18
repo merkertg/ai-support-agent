@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Интерфейс оператора собирается отдельно: ему нужны только Streamlit и httpx.
 # Цель выбирается явно (--target ui); без --target по-прежнему собирается API.
 FROM python-base AS ui-builder
-COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /bin/uv
 
 WORKDIR /app
 ENV UV_PYTHON_DOWNLOADS=0 \
@@ -47,7 +47,7 @@ CMD ["streamlit", "run", "operator_ui/main.py", "--server.address", "0.0.0.0", "
 
 # В builder создаём окружение только с зависимостями работающего приложения.
 FROM python-base AS builder
-COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /bin/uv
 
 WORKDIR /app
 # Используем Python базового образа и копируем файлы из кеша в .venv.

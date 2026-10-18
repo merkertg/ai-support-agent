@@ -2,7 +2,7 @@
 
 A Python learning project for a technical support assistant. It helps an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery. TechFlow products and all support data are fictional.
 
-The project implements **all ten stages**: a FastAPI service with PostgreSQL 17 and Qdrant 1.19, REST APIs for customers, products, licenses, tickets, and support staff, LLM draft previews, and a bounded agent. The agent reads ticket data and searches a Markdown knowledge base through five read-only tools, then saves a `pending` reply suggestion that cites only the articles it found. A LangGraph workflow pauses until an employee approves or rejects the suggestion; approval delivers the reply as a ticket message. A Streamlit operator interface works on top of the HTTP API, offline evaluations measure search quality and server-side safety guarantees, and a repeatable demo scenario prepares a pending suggestion for a human decision. The default mock mode needs no API key; OpenAI providers require explicit credentials. GitHub Actions checks the application, builds and smoke-tests the API and UI images, runs the evaluations and the demo scenario, and publishes the tested API image to GHCR.
+The project implements **all ten stages**: a FastAPI service with PostgreSQL 17 and Qdrant 1.19, REST APIs for customers, products, licenses, tickets, and support staff, LLM draft previews, and a bounded agent. The agent reads ticket data and searches a Markdown knowledge base through five read-only tools, then saves a `pending` reply suggestion that cites only the articles it found. A LangGraph workflow pauses until an employee approves or rejects the suggestion; approval delivers the reply as a ticket message. A Streamlit operator interface works on top of the HTTP API, offline evaluations measure search quality and server-side safety guarantees, and a repeatable demo scenario prepares a pending suggestion for a human decision. The default mock mode needs no API key; OpenAI providers require explicit credentials. GitHub Actions checks the application, builds and smoke-tests the API and UI images, runs the evaluations and the demo scenario, and publishes both tested images to GHCR after a push to main or a validated version tag. CI requires at least 85% combined line/branch coverage; abandoned agent runs recover automatically, and weekly dependency updates arrive as reviewable pull requests.
 
 **Начни с [демонстрации](docs/DEMO.md)** или с [быстрого запуска](docs/instructions/quickstart.md). Интерфейс оператора после запуска: <http://127.0.0.1:8502>.
 
@@ -47,6 +47,9 @@ Stage learning guides in Russian:
 - [CI/CD and Docker guide](docs/CI_CD.md)
 - [Наглядное руководство PDF](docs/guide/ai-support-agent-guide.pdf) и [его пересборка](docs/guide/README.md)
 - [Полная проверка проекта](docs/VERIFICATION.md)
+- [Восстановление зависших запусков](docs/RUN_RECOVERY.md)
+- [Автоматические PR зависимостей](docs/DEPENDENCY_UPDATES.md)
+- [Версии и публикация API/UI](docs/RELEASES.md)
 
 Design and history:
 

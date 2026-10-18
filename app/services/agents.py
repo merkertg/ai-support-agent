@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.config import get_agent_settings
@@ -21,13 +21,15 @@ from app.schemas.drafts import AgentDraftContent
 from app.schemas.resources import CLOSED_TICKET_STATUSES
 from app.services.errors import ResourceConflict, ResourceNotFound
 from app.services.knowledge import open_configured_index
+from app.services.run_recovery import (
+    log_recovered_runs,
+    recover_stale_runs,
+    stale_cutoff,
+)
 
 # Фабрика возвращается из Depends без вызова. Существование обращения
 # проверяем раньше конфигурации внешнего провайдера, как и в /draft.
 ProviderFactory = Callable[[], AgentProvider]
-# Запас поверх лимита времени агента: running старше лимита и запаса оставлен
-# аварийно остановленным процессом и не блокирует новый анализ обращения.
-STALE_RUNNING_GRACE_SECONDS = 60
 logger = get_logger("agent")
 TICKET_CLOSED = "Обращение закрыто: анализ недоступен"
 
@@ -96,9 +98,17 @@ def finish_run(
 ) -> None:
     """Атомарно записать прогресс и либо pending-предложение, либо ошибку."""
     with session.begin():
-        run = session.get(AgentRun, run_id)
+        # Recovery и завершение сериализуются на одной строке. Старый worker,
+        # проснувшийся после recovery, уже не может создать pending-черновик.
+        run = session.get(
+            AgentRun, run_id, with_for_update=True, populate_existing=True
+        )
         if run is None:
             raise ResourceNotFound("Запуск агента не найден")
+        if run.status != "running":
+            raise AgentRunFailure(
+                409, "Запуск уже завершён: новый результат не сохранён.", run_id
+            )
         snapshot = progress.to_dict()
         run.steps = snapshot["steps"]
         run.tool_trace = snapshot["tool_trace"]
@@ -128,7 +138,7 @@ def finish_run(
             )
 
 
-def ensure_analyzable(session: Session, ticket: Ticket, timeout_seconds: float) -> None:
+def ensure_analyzable(session: Session, ticket: Ticket) -> None:
     """Запретить анализ закрытого обращения и второй черновик того же обращения.
 
     Иначе у обращения копились бы несколько pending-предложений, и одобрение
@@ -149,16 +159,14 @@ def ensure_analyzable(session: Session, ticket: Ticket, timeout_seconds: float) 
             f"У обращения уже есть предложение {pending} на проверке: "
             "примите по нему решение до нового анализа"
         )
-    # Время сравнивается на стороне PostgreSQL: started_at задаёт тот же сервер.
-    window = func.make_interval(
-        0, 0, 0, 0, 0, 0, timeout_seconds + STALE_RUNNING_GRACE_SECONDS
-    )
+    # Верхняя граница едина с recovery и не уменьшается из-за нового .env.
+    # Брошенные строки окончательно завершаем под блокировкой Ticket ниже.
     running = session.scalar(
         select(AgentRun.id)
         .where(
             AgentRun.ticket_id == ticket.id,
             AgentRun.status == "running",
-            AgentRun.started_at > func.now() - window,
+            AgentRun.started_at > stale_cutoff(),
         )
         .order_by(AgentRun.id)
         .limit(1)
@@ -188,7 +196,7 @@ def analyze_ticket(
         raise ResourceNotFound("Обращение не найдено")
     settings = get_agent_settings()
     # Быстрый отказ до настройки провайдера; повтор под блокировкой ниже.
-    ensure_analyzable(session, ticket, settings.agent_timeout_seconds)
+    ensure_analyzable(session, ticket)
     context = AgentContext(
         ticket_id=ticket.id,
         customer_id=ticket.customer_id,
@@ -212,7 +220,8 @@ def analyze_ticket(
         )
         if locked is None:
             raise ResourceNotFound("Обращение не найдено")
-        ensure_analyzable(session, locked, settings.agent_timeout_seconds)
+        recovered = recover_stale_runs(session, ticket_id=ticket_id)
+        ensure_analyzable(session, locked)
         run = AgentRun(
             ticket_id=ticket_id,
             status="running",
@@ -224,6 +233,7 @@ def analyze_ticket(
         session.add(run)
         session.flush()
         run_id = run.id
+    log_recovered_runs(recovered)
     # Из ORM после commit не читаем поля: expire_on_commit открыл бы новый SQL
     # при обращении к ним прямо перед длительным вызовом модели.
     try:

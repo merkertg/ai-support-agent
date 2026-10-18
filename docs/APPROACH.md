@@ -112,7 +112,7 @@ Stage 05 adds `POST /api/tickets/{resource_id}/analyze` and `GET /api/agent-runs
 
 The four tools are `get_ticket`, `get_customer` (without email), `get_license` (only within the ticket's customer and product; `valid` also checks issue and expiry dates), and `get_ticket_history` (up to five other tickets for the same customer and product). Arguments are parsed by strict Pydantic schemas that reject unknown fields, type coercion, and duplicate JSON keys. Invalid calls return a structured tool error to the model and still consume the budget. Each tool opens its own short session with `SET TRANSACTION READ ONLY` and statement/lock timeouts, so PostgreSQL itself rejects writes. The trace stores validated arguments with license keys masked.
 
-The service never holds a database connection while waiting for the provider. It reads the ticket, ends that transaction, commits a `running` run, executes the loop, and then saves either `completed` with the result, trace, usage, and exactly one `pending` suggestion, or `failed` with a constant safe message and partial progress — each in one transaction. Errors after the run starts return `run_id`. A process crash during the final commit may leave a run `running`; there is no recovery job yet.
+The service never holds a database connection while waiting for the provider. It reads the ticket, ends that transaction, commits a `running` run, executes the loop, and then saves either `completed` with the result, trace, usage, and exactly one `pending` suggestion, or `failed` with a constant safe message and partial progress — each in one transaction. Errors after the run starts return `run_id`. A process crash may leave a run `running`. The recovery monitor checks every 30 seconds and conditionally changes runs older than 180 seconds to `failed`, preserving partial diagnostics. Analysis retries recover stale runs under the ticket lock; late workers cannot create suggestions after recovery. PostgreSQL race tests verify that a committed successful result is preserved. See [run recovery](RUN_RECOVERY.md).
 
 The mock provider performs three deterministic steps with the real tools and labels its reply as a demonstration. The OpenAI adapter uses the Responses API with strict function schemas, `store=False`, no retries, disabled truncation, and replays all output items, including `reasoning.encrypted_content`. It is tested with the real SDK and a substituted HTTP transport; no live model request has been made. Migration `0002_agent_runtime` adds the run fields with backward-compatible defaults. The [Stage 05 guide](STAGE_05.md) documents the full flow.
 
@@ -173,7 +173,7 @@ After both Python checks and the security audit succeed, the container job build
 
 The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration, migrations, and the knowledge articles. CI verifies UID 10001 and the absence of development tools in the runtime image. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
 
-On a successful push to `main`, that same tested image is exported as an artifact, loaded and identified again in the publication job, and pushed to GHCR without rebuilding. Each commit receives a full SHA tag; only the current `main` tip updates `latest`. Publications queue sequentially. The workflow uses `GITHUB_TOKEN`, with `packages: write` limited to the publication job.
+On a successful push to `main` or a validated stable `vX.Y.Z` tag from main history, both tested API and UI images are exported in one artifact, loaded and identified again in the publication job, and pushed to GHCR without rebuilding. Each successful main push receives a full SHA tag; only the current `main` tip updates `latest`. Version events publish only their version tags. Publications queue sequentially. The workflow uses `GITHUB_TOKEN`, with `packages: write` limited to the publication job.
 
 This implements continuous delivery of a container image. External server deployment is outside the chosen scope. Detailed operation is documented in [CI_CD.md](CI_CD.md). GitHub execution and publication must be confirmed from an actual workflow run, independently of local checks.
 
@@ -209,8 +209,15 @@ FastAPI routes → business services → repositories → PostgreSQL
 
 The interface communicates only through the API. Server-side services enforce the data scope and expose a restricted set of agent tools. The agent prepares a suggestion for human review. Stage 07 already uses LangGraph around the tool-calling loop from Stage 05 to pause for human review and resume with a decision.
 
-All of these components are implemented. Authentication and roles, real message delivery, live OpenAI quality and cost measurement, publishing the UI image, and server deployment remain future work.
+All of these components are implemented. Authentication and roles, real message delivery, live OpenAI quality and cost measurement, and server deployment remain future work. UI image publication is configured alongside the API; a successful remote workflow is needed to confirm delivery of the new commit.
 
 ## Next steps
 
 The ten learning stages are complete. Further work should start from one verifiable result at a time: a live OpenAI run on the same evaluation set once a key and budget are approved; authentication and per-operation access checks before real operators use the system; reliable delivery through a real email or helpdesk channel; and a separate deployment job with secrets, TLS, backups, and monitoring. The [demo guide](DEMO.md) lists the same steps.
+
+
+## Operational completion
+
+CI has five jobs: delivery validation, Python checks, runtime dependency audit, container checks, and publication. Coverage includes application, UI, evaluations and operational scripts, with branches enabled and an 85% combined threshold; the visual PDF generator is excluded. XML, JSON and HTML reports remain available even if the threshold fails. uv 0.12.23 is pinned after checking lock compatibility and separate API/UI installs.
+
+Weekly dependency preparation advances the 14-day cutoff and resolves a lock without building packages. A separate limited writer creates or updates a two-file PR on the reserved automation branch and explicitly dispatches CI. It never merges to main. Version delivery checks both registry tags before the first write, refuses conflicting image IDs, and keeps historical release tags from changing latest. See [dependency updates](DEPENDENCY_UPDATES.md) and [releases](RELEASES.md) for operation and failure handling.

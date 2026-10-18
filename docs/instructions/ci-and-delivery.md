@@ -2,25 +2,82 @@
 
 [← README](../../README.md) · [All documentation](../../README.md#documentation)
 
-What the GitHub Actions workflow checks and how the tested image is published.
-
-The workflow runs for pushes to `main`, pull requests targeting `main`, and manual checks:
+The workflow checks every push to `main`, pull request targeting `main`,
+manual check, and explicit release tag push matching `v*`.
+A first job accepts only stable `vX.Y.Z` tags with no leading zero or suffix,
+resolves annotated tags to the exact run commit, and requires that commit
+to belong to the history of `origin/main`.
 
 ```text
-Python checks: lock + dependency age + workflow/docs + PostgreSQL/Qdrant + migrations + Ruff + tests + evaluations
-Dependency audit: locked API runtime and UI packages + current PyPI vulnerability data
-                                  ↓ both must pass
-API and UI image builds + UID/tools gates + Trivy scan + Compose + knowledge + HTTP + persistence
-  + operator UI health and page render + demo scenario with both review branches + log leak check
+Validate delivery target: exact commit + strict release tag + main ancestry
                                   ↓
-Publish the tested image to GHCR (push to main only)
+Python checks: lock + age + workflow/docs + migrations + Ruff + tests/coverage ≥85% + evaluations
+Dependency audit: locked API/UI packages + current vulnerability data
+                                  ↓ both must pass
+API/UI builds + UID/tools gates + Trivy + Compose + knowledge + HTTP + persistence
+  + Streamlit health/page render + demo review branches + license log leak check
+                                  ↓
+Publish the same tested API and UI images to GHCR
 ```
 
-The Python job first requires every package in `uv.lock` to be at least 14 days old on PyPI (`scripts/check_dependency_age.py`, dates read from the lock itself) and the `[tool.uv] exclude-newer` date to respect the same limit. It then validates the workflow with checksum-pinned actionlint 1.7.12, checks Markdown links, Bash/JSON examples and Python docstrings with `scripts/check_project.py`, applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The independent `security` job exports runtime requirements with hashes from `uv.lock` and uses pinned `pip-audit==2.10.1` to query current vulnerability information. Findings, missing package data or network errors fail the job; the report upload runs with `always()`. The container job waits for both checks, builds once, confirms UID/GID 10001 and absence of pytest, Ruff and uv, starts `db → migrate`, `qdrant → api`, indexes the knowledge base, checks health/readiness, the business API, knowledge search, a mock draft, a saved mock agent run with sources, and an approved review with delivery, and leaves one more workflow waiting. It compares saved demo records, the reviewed run, and search results before and after removing and recreating the Compose containers while retaining the PostgreSQL and Qdrant volumes; a second indexing run must report no changes, and the waiting LangGraph workflow is then resumed in the new containers with `--review-run`. CI explicitly selects mock with no OpenAI credentials. The draft and agent smoke checks create disposable fixture records only after confirming mock configuration. After that, Compose starts the Streamlit UI, `scripts/demo_scenario.py --verify-review` must leave the main suggestion `pending` and confirm one approved and one rejected branch, a repeated run must produce identical JSON, and the real UI page is rendered inside its container with Streamlit AppTest against the API. The Python job also runs `python -m evaluations.run`; a violated threshold fails the job. Right after building, both images are scanned by Trivy 0.75.0, run as an image pinned by digest rather than through `trivy-action` (whose tags were hijacked in March 2026, CVE-2026-33634); HIGH or CRITICAL findings with an available fix fail the job, and the full reports are uploaded as `image-scan`. After the demo, the API log must contain JSON request records and none of the license keys that smoke and demo sent. All third-party images are pinned by digest. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
+The Python job installs uv **0.12.23**, requires packages in `uv.lock` to be
+at least 14 days old, validates every workflow with checksum-pinned actionlint,
+and checks Markdown links, Bash/JSON examples and Python docstrings.
+It applies migrations to an isolated PostgreSQL test database, checks schema
+drift, runs Ruff, all tests, coverage and offline evaluations. Coverage of
+`app`, `operator_ui`, `evaluations` and `scripts` must reach 85%; the PDF
+generator is excluded. Reports include XML, JSON and HTML. The independent
+security job audits locked API and UI runtime requirements with hashes;
+findings or failed verification block delivery. CI uses mock providers
+without OpenAI credentials.
 
-Only the API image is published: `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The UI image is built and checked in CI and built locally by Compose. The current tip of `main` can also update `latest`. The workflow delivers an image to the registry; running it on an external server is a later step.
+Both Docker images are built once and scanned with digest-pinned Trivy.
+The container scenario checks non-root users and excluded development tools,
+indexes knowledge, verifies API operations, runs a mock agent and both review
+branches, recreates containers while retaining PostgreSQL/Qdrant volumes,
+resumes a waiting review, renders the real Streamlit page, and confirms that
+license keys did not enter the JSON API log. All third-party images and
+external actions are pinned by digest or commit.
 
-**[Подробная инструкция CI/CD на русском](../CI_CD.md)** explains GitHub permissions, logs, artifacts, image tags, local reproduction, and troubleshooting. A local `git commit` starts no GitHub jobs until the commit is pushed. Confirm execution and publication in an actual GitHub Actions run.
+The `tested-docker-images` artifact contains one `tested-images.tar` archive
+with both images and `tested-images.json` with the full commit and both
+image IDs. The publication job loads that archive, checks both IDs and never
+rebuilds. It publishes:
 
+| Package | Main push | Explicit valid release tag |
+| --- | --- | --- |
+| `ghcr.io/merkertg/ai-support-agent` | `sha-<full SHA>` and eligible `latest` | `vX.Y.Z` |
+| `ghcr.io/merkertg/ai-support-agent-ui` | `sha-<full SHA>` and eligible `latest` | `vX.Y.Z` |
 
-The four job names are **Python checks**, **Audit runtime dependencies**, **Build and smoke test Docker**, and **Publish tested image to GHCR**. The last job is skipped for PRs and manual checks. Artifacts include `pytest-report`, `evaluation-report`, `dependency-audit` and `image-scan` (7 days), plus `tested-docker-image` for main pushes (1 day). A local test result does not confirm a remote Actions run.
+`latest` is updated only when a main run still matches the current main tip
+at the time of the GitHub API check. A release tag changes neither `latest`
+nor main SHA tags. Before pushing either release image, both remote version
+references are checked: a missing manifest allows publication, an identical
+config/manifest/index ID is reused, and a conflicting image blocks both writes. Network or
+authorization errors are failures, not proof of a free tag. Classic Docker config IDs and containerd manifest/index IDs are supported.
+For an index, only its full digest can match the tested ID; child manifest
+digests cannot approve a different index. Media types, schema and nonempty
+index descriptors are validated, and raw response digests are verified after publication. A failed partial push
+can resume with the same artifact; a fresh rebuild may require a new version.
+The workflow does not choose version numbers, create GitHub Releases or
+deploy to an external server.
+
+The five job names are **Validate delivery target**, **Python checks**,
+**Audit runtime dependencies**, **Build and smoke test Docker**, and
+**Publish tested image to GHCR**. Publication is skipped for PR and all
+`workflow_dispatch` runs, including dependency update checks. Artifacts
+`pytest-report`, `coverage-report`, `evaluation-report`, `dependency-audit`
+and `image-scan` last 7 days; `tested-docker-images` lasts 1 day.
+
+A separate dependency update workflow prepares changes and opens or updates
+a PR; it never merges automatically. It explicitly dispatches ordinary CI
+for the update branch because changes made by `GITHUB_TOKEN` do not trigger
+PR workflows by themselves. Publication remains disabled for that dispatch.
+
+**[Подробная инструкция CI/CD на русском](../CI_CD.md)** covers permissions,
+logs, artifacts, local checks and failures.
+**[Версии и восстановление публикации](../RELEASES.md)** explains the exact
+release procedure and running an API/UI pair.
+**[Обновление зависимостей](../DEPENDENCY_UPDATES.md)** describes its schedule
+and review workflow. A local result is not confirmation of a GitHub run;
+confirm the exact commit or tag in Actions and both package digests.
