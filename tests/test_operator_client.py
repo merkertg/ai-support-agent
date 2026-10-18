@@ -199,3 +199,23 @@ def test_conflict_hint_depends_on_the_action(operation, expected):
     assert raised.value.status_code == 409
     assert str(raised.value).startswith(expected)
     assert "internal" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef"),
+        ("<script>x</script>", None),
+    ],
+)
+def test_error_keeps_only_safe_request_id(header, expected):
+    """Код запроса из заголовка API показывается, только если он безопасен."""
+
+    def handler(request):
+        """Вернуть ошибку сервера с id запроса в заголовке."""
+        return httpx.Response(503, json={}, headers={"X-Request-ID": header})
+
+    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as raised:
+            client.dashboard()
+    assert raised.value.request_id == expected

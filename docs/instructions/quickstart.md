@@ -62,6 +62,17 @@ docker compose down
 
 Ordinary `down` retains the named PostgreSQL and Qdrant volumes and their data.
 
+## Read the API log
+
+The API writes one JSON line per event to stdout: requests (method, path without the query string, status, duration), agent runs, resource and database errors, failed LLM calls, and workflow checkpoint repairs. Every line carries `request_id`, which the API also returns in the `X-Request-ID` response header; the operator UI shows it as «Код запроса для администратора» next to an error.
+
+```bash
+docker compose logs --no-color api | grep '"level": "ERROR"'
+docker compose logs --no-color api | grep 'REQUEST_ID_FROM_UI'
+```
+
+Bodies, query strings, SQL, driver messages, and SDK response texts are not logged, so license keys and personal data stay out of the log; database errors are described by class and SQLSTATE, provider errors by class, HTTP status, and the provider's request id. Unexpected exceptions return `{"detail": ...}` with HTTP 500 and the request id, while the traceback goes only to the log. Uvicorn's own access log is disabled because it would print query strings. Set `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) in `.env`; successful `/health` and `/ready` checks are not logged.
+
 ## Update an existing stack
 
 After pulling new code, rebuild and restart without `down`:

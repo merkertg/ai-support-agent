@@ -1,5 +1,6 @@
 """Точка входа API: создаём приложение и описываем проверку его работы."""
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,6 +27,13 @@ from app.api.reviews import router as reviews_router
 from app.api.routes import router as api_router
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_session
 from app.llm.errors import LLMError
+from app.observability import (
+    RequestContextMiddleware,
+    configure_logging,
+    database_fields,
+    get_logger,
+    log_event,
+)
 from app.services.agents import AgentRunFailure
 from app.services.errors import ResourceError
 from app.workflow.checkpoint import close_checkpointer
@@ -33,6 +41,7 @@ from app.workflow.checkpoint import close_checkpointer
 # Путь не зависит от каталога, из которого запущен Uvicorn.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 READINESS_ERROR = "База данных недоступна или её схема не готова"
+logger = get_logger("api")
 
 
 @asynccontextmanager
@@ -41,7 +50,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     При старте не открываем соединения и не создаём таблицы: за изменение
     схемы отвечает явный запуск Alembic, локально или в сервисе migrations.
+    Журнал настраивается здесь: импорт модуля в тестах не меняет вывод.
     """
+    configure_logging()
+    log_event(logger, logging.INFO, "api_started", version=application.version)
     try:
         yield
     finally:
@@ -58,7 +70,8 @@ def get_readiness_session() -> Iterator[Session]:
     """
     try:
         yield from get_session()
-    except (DatabaseNotConfigured, ValidationError, SQLAlchemyError):
+    except (DatabaseNotConfigured, ValidationError, SQLAlchemyError) as error:
+        log_event(logger, logging.WARNING, "readiness_failed", **database_fields(error))
         raise HTTPException(status_code=503, detail=READINESS_ERROR) from None
 
 
@@ -123,6 +136,14 @@ def ready(
     except (CommandError, OSError):
         raise HTTPException(status_code=503, detail=READINESS_ERROR) from None
     if not expected_revisions or current_revisions != expected_revisions:
+        log_event(
+            logger,
+            logging.WARNING,
+            "readiness_failed",
+            error="MigrationMismatch",
+            current=sorted(current_revisions),
+            expected=sorted(expected_revisions),
+        )
         raise HTTPException(status_code=503, detail=READINESS_ERROR)
     return {"status": "ok", "database": "ok"}
 
@@ -140,3 +161,5 @@ app.add_exception_handler(ResourceError, resource_error_handler)
 app.add_exception_handler(SQLAlchemyError, database_error_handler)
 # PostgresSaver использует psycopg напрямую, без обёртки SQLAlchemy.
 app.add_exception_handler(PsycopgError, database_error_handler)
+# Id запроса в заголовке ответа и в каждой строке журнала; JSON 500 вместо трейса.
+app.add_middleware(RequestContextMiddleware)

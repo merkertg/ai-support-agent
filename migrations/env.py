@@ -12,7 +12,9 @@ from app.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Не отключать журналы, созданные до миграции: при запуске Alembic в том же
+    # процессе (тесты) иначе замолчал бы JSON-журнал приложения «app».
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 # Таблицы checkpointer LangGraph создаёт миграция 0004 по DDL библиотеки, но

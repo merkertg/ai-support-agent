@@ -26,6 +26,7 @@ from app.models import (
     TicketMessage,
     User,
 )
+from app.observability import INTERNAL_ERROR
 from app.services import agents, reviews
 from app.workflow.checkpoint import open_saver
 
@@ -532,8 +533,6 @@ def test_checkpoint_outage_after_analysis_preserves_durable_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Отказ checkpoint после commit анализа восстанавливается без второго агента."""
-    from app.services import agents
-
     fault = fail_saver_when_armed(monkeypatch, savers)
     original_analyze = agents.analyze_ticket
 
@@ -544,8 +543,11 @@ def test_checkpoint_outage_after_analysis_preserves_durable_run(
         return result
 
     monkeypatch.setattr(agents, "analyze_ticket", committed_analysis)
-    with pytest.raises(OSError, match="checkpoint outage"):
-        client.post(f"/api/tickets/{ticket['id']}/analyze")
+    # Непредвиденный отказ хранилища: безопасный JSON 500 с id запроса.
+    outage = client.post(f"/api/tickets/{ticket['id']}/analyze")
+    assert outage.status_code == 500, outage.text
+    assert outage.json() == {"detail": INTERNAL_ERROR}
+    assert outage.headers["X-Request-ID"]
     fault["failed"] = False
     with Session(migrated_engine) as session:
         run = session.scalar(select(AgentRun))
@@ -587,8 +589,9 @@ def test_checkpoint_outage_after_review_does_not_repeat_delivery(
     monkeypatch.setattr(reviews, "apply_review", committed_review)
     path = f"/api/suggestions/{run['suggestion']['id']}/review"
     body = {"decision": decision, "reviewer_id": user["id"], "comment": "Проверено"}
-    with pytest.raises(OSError, match="checkpoint outage"):
-        client.post(path, json=body)
+    outage = client.post(path, json=body)
+    assert outage.status_code == 500, outage.text
+    assert outage.json() == {"detail": INTERNAL_ERROR}
     fault["failed"] = False
     state = client.get(f"/api/agent-runs/{run['id']}/workflow")
     assert state.status_code == 200, state.text

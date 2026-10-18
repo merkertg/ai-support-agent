@@ -533,6 +533,19 @@ def test_closed_ticket_disables_analysis(desktop, status):
     assert api.posts == []
 
 
+def test_server_error_shows_request_code_for_administrator(monkeypatch):
+    """Код запроса из ответа API помогает найти строку в журнале сервера."""
+
+    def failing_client():
+        """Сымитировать ответ 503 с id запроса."""
+        raise APIError("Сервис временно недоступен.", 503, None, "req-0123456789")
+
+    monkeypatch.setattr(app, "make_client", failing_client)
+    screen = AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run()
+    assert not screen.exception
+    assert any("req-0123456789" in item.value for item in screen.caption)
+
+
 def test_missing_provider_status_disables_analysis(desktop):
     """Неизвестный embedding provider не допускает потенциально платный вызов."""
     screen, api = desktop

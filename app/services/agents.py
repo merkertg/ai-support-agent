@@ -1,5 +1,6 @@
 """Запуск агента с короткими SQL-транзакциями и сохранением проверяемого итога."""
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -14,6 +15,7 @@ from app.agent.tools import SQLToolExecutor
 from app.knowledge.index import IndexFactory
 from app.llm.errors import LLMError, LLMUnavailableError
 from app.models import AgentRun, AgentSuggestion, Ticket
+from app.observability import get_logger, log_event, upstream_fields
 from app.schemas.agents import AgentRunRead, AnalyzeRequest, SuggestionRead
 from app.schemas.drafts import AgentDraftContent
 from app.schemas.resources import CLOSED_TICKET_STATUSES
@@ -26,6 +28,7 @@ ProviderFactory = Callable[[], AgentProvider]
 # Запас поверх лимита времени агента: running старше лимита и запаса оставлен
 # аварийно остановленным процессом и не блокирует новый анализ обращения.
 STALE_RUNNING_GRACE_SECONDS = 60
+logger = get_logger("agent")
 TICKET_CLOSED = "Обращение закрыто: анализ недоступен"
 
 
@@ -226,16 +229,48 @@ def analyze_ticket(
     try:
         outcome = runtime.run(context)
     except LLMError as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "agent_run_failed",
+            run_id=run_id,
+            ticket_id=ticket_id,
+            provider=provider.provider,
+            error=type(error).__name__,
+            status=error.status_code,
+            steps=runtime.progress.steps,
+            **upstream_fields(error),
+        )
         finish_run(session, run_id, runtime.progress, error=error)
         raise AgentRunFailure.of(error, run_id) from None
     except Exception:
         # Неожиданная ошибка также получает конечный статус и безопасный текст.
         # Если сама БД недоступна, запись finish_run откатится и общий handler
         # вернёт 503; обещать сохранение failed в этом случае невозможно.
+        log_event(
+            logger,
+            logging.ERROR,
+            "agent_run_crashed",
+            exc_info=True,
+            run_id=run_id,
+            ticket_id=ticket_id,
+            provider=provider.provider,
+            steps=runtime.progress.steps,
+        )
         error = LLMUnavailableError()
         finish_run(session, run_id, runtime.progress, error=error)
         raise AgentRunFailure.of(error, run_id) from None
     finish_run(
         session, run_id, outcome.progress, result=outcome.final, model=outcome.model
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "agent_run_completed",
+        run_id=run_id,
+        ticket_id=ticket_id,
+        provider=provider.provider,
+        steps=outcome.progress.steps,
+        sources=len(outcome.final.sources),
     )
     return read_run(session, run_id)

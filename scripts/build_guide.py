@@ -1552,8 +1552,8 @@ def ci_pipeline(c, w, h):
         ),
         (
             "2. Docker + smoke",
-            "образы API и UI, Compose\nиндексация, --check-review\n"
-            "пересоздание: данные живы\nUI + демо-сценарий",
+            "образы API и UI + Trivy\nCompose, --check-review\n"
+            "пересоздание: данные живы\nUI, демо, журнал без ключей",
             VIOLET_L,
             VIOLET,
         ),
@@ -2852,6 +2852,16 @@ def append_audit_pages(story, verification):
                     "Показ воспроизводится без ручных шагов",
                 ),
                 (
+                    "Сканирование",
+                    "Trivy 0.75.0 по digest; HIGH/CRITICAL с исправлением",
+                    "Известные уязвимости ОС и Python в образах",
+                ),
+                (
+                    "Журнал",
+                    "JSON-строки запросов; нет ключей smoke и демо",
+                    "Секреты не попадают в логи",
+                ),
+                (
                     "Доставка",
                     "Загрузить тот же образ; сверить ID",
                     "Публикуется проверенная сборка",
@@ -2914,6 +2924,15 @@ def append_audit_pages(story, verification):
                     "ONLY инструменты",
                 ),
                 ("Тесты", "Отдельная *_test БД, временные test_* коллекции Qdrant"),
+                (
+                    "Образы",
+                    "Сторонние образы по digest; Trivy без trivy-action "
+                    "(CVE-2026-33634)",
+                ),
+                (
+                    "Журнал API",
+                    "JSON с X-Request-ID; без query string, SQL, тел запросов и ключей",
+                ),
                 (
                     "Публикация",
                     "Только успешный push в main; SHA-тег для каждого коммита",
@@ -3216,6 +3235,11 @@ def append_audit_pages(story, verification):
                     "Дождаться healthy api, обновить страницу",
                 ),
                 (
+                    "UI: код запроса",
+                    "docker compose logs api, поиск кода",
+                    "Класс ошибки, SQLSTATE, ответ провайдера",
+                ),
+                (
                     "Порт занят",
                     "compose ps; API_PORT, POSTGRES_PORT",
                     "Выбрать свободный порт и согласовать URL",
@@ -3279,6 +3303,7 @@ def append_audit_pages(story, verification):
             "docker compose ps --all\n"
             "docker compose logs --no-color --tail 100 \\\n"
             "  api ui migrate db qdrant\n"
+            'docker compose logs --no-color api | grep \'"level": "ERROR"\'\n'
             "docker compose exec -T api python -m alembic current"
         ),
         Spacer(1, 9),

@@ -1,5 +1,6 @@
 """Запуск и продолжение процесса проверки: HTTP ↔ LangGraph ↔ PostgreSQL."""
 
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from uuid import uuid4
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.knowledge.index import IndexFactory
 from app.models import AgentRun, AgentSuggestion, Ticket, TicketMessage
+from app.observability import get_logger, log_event
 from app.schemas.agents import AgentRunRead, AnalyzeRequest
 from app.schemas.reviews import (
     ReviewRequest,
@@ -26,6 +28,19 @@ from app.workflow.graph import REVIEW_NODE, WorkflowContext, build_graph
 
 CheckpointerFactory = Callable[[], BaseCheckpointSaver]
 NO_WORKFLOW = "У запуска нет процесса проверки: он создан до этапа 07"
+logger = get_logger("workflow")
+
+
+def log_repair(run: AgentRun, outcome: str) -> None:
+    """Отметить в журнале, что checkpoint выровнен по фактам БД."""
+    log_event(
+        logger,
+        logging.WARNING,
+        "workflow_checkpoint_repaired",
+        run_id=run.id,
+        ticket_id=run.ticket_id,
+        outcome=outcome,
+    )
 
 
 def thread_config(thread_id: str) -> dict:
@@ -181,6 +196,7 @@ def restore_workflow(
     complete_ids = all(values.get(key) == value for key, value in expected.items())
     if run.status == "failed":
         if not complete_ids or values.get("outcome") != "failed" or snapshot.next:
+            log_repair(run, "failed")
             graph.update_state(
                 config, expected | {"outcome": "failed"}, as_node="analyze"
             )
@@ -194,6 +210,7 @@ def restore_workflow(
             or snapshot.next != (REVIEW_NODE,)
             or values.get("outcome") != "awaiting_review"
         ):
+            log_repair(run, "awaiting_review")
             graph.update_state(
                 config, expected | {"outcome": "awaiting_review"}, as_node="analyze"
             )
@@ -209,6 +226,7 @@ def restore_workflow(
     if complete_ids and values.get("outcome") == outcome and not snapshot.next:
         return
     ticket = session.get(Ticket, run.ticket_id)
+    log_repair(run, outcome)
     graph.update_state(
         config,
         expected

@@ -23,6 +23,7 @@ app/
   workflow/              # LangGraph review graph, PostgreSQL checkpointer, service
   services/              # Business checks, queries and explicit transactions
   config.py              # DATABASE_URL from environment or .env
+  observability.py       # JSON log, X-Request-ID middleware, safe error fields
   db/
     base.py              # DeclarativeBase and constraint naming
     session.py           # Lazy engine and request-scoped sessions
@@ -58,6 +59,9 @@ tests/
   test_review_api.py     # Review and staff HTTP validation
   test_operator_*.py     # Operator API, UI HTTP client and Streamlit AppTest
   test_evaluations.py    # Metrics, labels and evaluation CLI exit codes
+  test_observability.py  # Request ids, JSON log lines, no secrets or SQL in logs
+  test_image_pins.py     # Every third-party image pinned by the same digest
+  test_dependency_age.py # Locked packages at least 14 days old on PyPI
   test_security_scenarios.py  # Agent scenarios and deliberate-regression checks
   test_demo_scenario.py  # Demo script against a fake HTTP API
   conftest.py            # In-memory checkpointer for every test by default
@@ -65,6 +69,7 @@ scripts/
   smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
   check_project.py       # Docstrings, Markdown links, Bash and JSON examples
   demo_scenario.py       # Idempotent mock demo through the HTTP API
+  check_dependency_age.py # Release-age policy for uv.lock and exclude-newer
   build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
 docs/
   instructions/          # Quickstart, API usage, testing, CI and this file

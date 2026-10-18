@@ -185,6 +185,12 @@ This implements continuous delivery of a container image. External server deploy
 
 **Demo.** `scripts/demo_scenario.py` uses only the HTTP API and the standard library. It refuses to write unless both providers are mock and the index is ready, then creates or reuses stable fictional records and leaves one pending suggestion for a person. `--verify-review` checks both decision branches on separate tickets. Sequential reruns read existing results instead of creating new ones.
 
+## Logging and supply chain
+
+The API logs one JSON line per event to stdout with a request id that is also returned in `X-Request-ID` and shown by the operator UI on errors. Lines carry classes, codes, and identifiers: database errors by class and SQLSTATE, provider errors by class, HTTP status, and provider request id, found through the exception's `__context__` because safe errors are raised `from None`. Bodies, query strings, SQL, driver messages, and SDK texts are never logged, so license keys stay out; Uvicorn's access log is disabled because it prints query strings. A pure ASGI middleware turns unexpected exceptions into a JSON 500 with the request id and logs the traceback. Alembic's `fileConfig` keeps existing loggers enabled.
+
+Every third-party image is pinned by its multi-architecture index digest in the Dockerfile, Compose, and CI, and a test rejects unpinned or diverging references. CI scans both built images with a digest-pinned Trivy image and blocks fixable HIGH or CRITICAL findings.
+
 ## Architecture
 
 The implemented application follows this flow:

@@ -1,5 +1,6 @@
 """HTTP-предпросмотр LLM-черновика: никакой автоматической отправки клиенту."""
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -9,6 +10,7 @@ from app.api.dependencies import ApiSession
 from app.api.routes import ResourceId
 from app.llm.client import get_draft_client, llm_status
 from app.llm.errors import LLMError
+from app.observability import get_logger, log_event, upstream_fields
 from app.schemas.drafts import DraftResponse, LLMStatus
 from app.schemas.resources import ErrorRead
 from app.services import drafts
@@ -28,6 +30,15 @@ def get_llm_client() -> ClientFactory:
 
 async def llm_error_handler(request: Request, error: LLMError) -> JSONResponse:
     """Вернуть безопасную прикладную ошибку без ответа SDK и секретов настройки."""
+    log_event(
+        get_logger("llm"),
+        logging.WARNING,
+        "llm_error",
+        path=request.url.path,
+        status=error.status_code,
+        error=type(error).__name__,
+        **upstream_fields(error),
+    )
     return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
 
 

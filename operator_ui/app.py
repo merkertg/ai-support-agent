@@ -36,6 +36,8 @@ def show_error(error: APIError) -> None:
     st.error(str(error))
     if error.run_id:
         st.info(f"Запуск №{error.run_id} сохранён. Откройте его в истории обращения.")
+    if error.request_id:
+        st.caption(f"Код запроса для администратора: {error.request_id}")
 
 
 def read_status(client: APIClient, area: str) -> dict:

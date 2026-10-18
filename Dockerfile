@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # Обе стадии используют один и тот же Python: перенос .venv остаётся корректным.
-FROM python:3.12-slim AS python-base
+# Образы закреплены по digest индекса (все архитектуры): тег можно перезаписать,
+# digest — нет. Обновление: docker buildx imagetools inspect <образ>:<тег>.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS python-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -9,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Интерфейс оператора собирается отдельно: ему нужны только Streamlit и httpx.
 # Цель выбирается явно (--target ui); без --target по-прежнему собирается API.
 FROM python-base AS ui-builder
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
 
 WORKDIR /app
 ENV UV_PYTHON_DOWNLOADS=0 \
@@ -45,7 +47,7 @@ CMD ["streamlit", "run", "operator_ui/main.py", "--server.address", "0.0.0.0", "
 
 # В builder создаём окружение только с зависимостями работающего приложения.
 FROM python-base AS builder
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
 
 WORKDIR /app
 # Используем Python базового образа и копируем файлы из кеша в .venv.
@@ -82,4 +84,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3); payload = json.load(response); response.close(); assert response.status == 200 and payload == {'status': 'ok', 'database': 'ok'}"]
 
 # Exec-форма передаёт сигналы остановки напрямую серверу Uvicorn.
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Журнал доступа Uvicorn выключен: он пишет query string, где бывает license_key.
+# Запросы записывает приложение — JSON с id запроса и путём без параметров.
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

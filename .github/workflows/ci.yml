@@ -32,7 +32,7 @@ jobs:
     # Это отдельная БД runner: интеграционные тесты вправе сбрасывать её схему.
     services:
       postgres:
-        image: postgres:17
+        image: postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
         env:
           POSTGRES_USER: support
           POSTGRES_PASSWORD: support_ci
@@ -47,7 +47,7 @@ jobs:
       # Отдельный Qdrant runner: тесты создают и удаляют только коллекции test_*.
       # Готовность проверяет шаг ниже: в образе Qdrant нет curl для health-cmd.
       qdrant:
-        image: qdrant/qdrant:v1.19.1
+        image: qdrant/qdrant:v1.19.1@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
         env:
           QDRANT__TELEMETRY_DISABLED: "true"
         ports:
@@ -288,6 +288,41 @@ jobs:
           print("OK ui: UID/GID 10001; only Streamlit client, no server code")
           '
 
+      # Известные уязвимости ОС и Python-пакетов в обоих образах. Trivy запускается
+      # образом, закреплённым по digest, без trivy-action: в марте 2026 теги
+      # trivy-action и образы Trivy 0.69.4–0.69.6 были подменены (CVE-2026-33634).
+      # Блокируют HIGH/CRITICAL, для которых уже выпущено исправление; полный
+      # список, включая уязвимости без исправления, сохраняется в JSON-отчёте.
+      - name: Scan images for known vulnerabilities
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        run: |
+          mkdir -p reports/image-scan "$RUNNER_TEMP/trivy-cache"
+          scan() {
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$RUNNER_TEMP/trivy-cache:/cache" \
+              -v "$PWD/reports/image-scan:/reports" \
+              "$TRIVY_IMAGE" --cache-dir /cache image --quiet --scanners vuln "$@"
+          }
+          status=0
+          for image in ai-support-agent:ci ai-support-agent-ui:ci; do
+            name="${image%%:*}"
+            scan --format json --output "/reports/$name.json" "$image"
+            scan --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed \
+              --exit-code 1 "$image" || status=1
+          done
+          exit "$status"
+
+      - name: Upload image scan reports
+        if: ${{ !cancelled() && hashFiles('reports/image-scan/*.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-scan
+          path: reports/image-scan/
+          if-no-files-found: error
+          retention-days: 7
+
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
       # --no-build гарантирует использование только что собранного образа.
       - name: Start database, migrations and API
@@ -386,6 +421,17 @@ jobs:
           assert int(metrics["Всего обращений"]) >= 4, metrics
           print("OK ui page:", metrics)
           '
+
+      # Журнал API — JSON без query string и тел запросов. Smoke и демо отправляли
+      # ключи лицензий в теле и в фильтре ?license_key=: в логах их быть не должно.
+      - name: Check API logs for request records and leaked license keys
+        run: |
+          docker compose --project-name ai-support-ci logs --no-color api > api.log
+          grep -q '"event": "request"' api.log
+          if grep -n -e 'SMOKE-' -e 'DEMO-STAGE10' api.log; then
+            echo "Ключ лицензии попал в журнал API" >&2
+            exit 1
+          fi
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image

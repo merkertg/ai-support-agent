@@ -1,6 +1,8 @@
 # Локальный стенд этапов 02–10. Настройки берутся из .env, образ — из Dockerfile.
 name: ai-support-agent
 
+# Сторонние образы закреплены по digest: тег на Docker Hub можно перезаписать.
+# Те же digest используют CI и тест tests/test_image_pins.py.
 # Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
 x-application: &application
   image: ${APP_IMAGE:-ai-support-agent:local}
@@ -11,7 +13,7 @@ x-application: &application
 
 services:
   db:
-    image: postgres:17
+    image: postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-support}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Укажи POSTGRES_PASSWORD в .env}
@@ -31,7 +33,7 @@ services:
 
   # Векторная БД этапа 06: фрагменты статей базы знаний и их эмбеддинги.
   qdrant:
-    image: qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.19.1@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
     environment:
       # Учебный стенд не отправляет анонимную телеметрию Qdrant.
       QDRANT__TELEMETRY_DISABLED: "true"
@@ -81,6 +83,8 @@ services:
       KNOWLEDGE_MIN_SCORE: ${KNOWLEDGE_MIN_SCORE:-0.2}
       # LangGraph не отправляет трассы во внешний LangSmith.
       LANGSMITH_TRACING: "false"
+      # Журнал приложения: JSON в stdout, смотреть через docker compose logs api.
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:
@@ -122,7 +126,7 @@ services:
   # Отдельная одноразовая БД для integration tests. Данные development не затрагиваются.
   db-test:
     profiles: [test]
-    image: postgres:17
+    image: postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
     environment:
       POSTGRES_USER: support
       POSTGRES_PASSWORD: support_ci
@@ -142,7 +146,7 @@ services:
   # Отдельный одноразовый Qdrant для integration tests; индекс хранится в памяти.
   qdrant-test:
     profiles: [test]
-    image: qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.19.1@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
     ports:

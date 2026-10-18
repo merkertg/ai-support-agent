@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Self
 from urllib.parse import urlsplit
@@ -13,6 +14,8 @@ import httpx
 
 PAGE_SIZE = 20
 MAX_ID = 2**63 - 1
+# Id запроса из ответа API: по нему администратор находит строку журнала.
+REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{8,64}")
 # 409 у анализа и решения означает разные состояния: подсказка зависит от действия.
 ANALYZE_CONFLICT = (
     "Анализ не запущен: обращение закрыто, уже анализируется или ждёт решения "
@@ -31,6 +34,7 @@ class APIError(Exception):
     message: str
     status_code: int | None = None
     run_id: int | None = None
+    request_id: str | None = None
 
     def __str__(self) -> str:
         """Показать только подготовленное сообщение, пригодное для оператора."""
@@ -146,10 +150,12 @@ class APIClient:
             pass
         if conflict is not None:
             messages[409] = conflict
+        request_id = response.headers.get("X-Request-ID", "")
         raise APIError(
             messages.get(response.status_code, "API не смог выполнить действие."),
             response.status_code,
             run_id,
+            request_id if REQUEST_ID.fullmatch(request_id) else None,
         )
 
     def status(self, area: str) -> dict:
