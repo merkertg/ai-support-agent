@@ -13,6 +13,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 MAX_RESPONSE_BYTES = 1024 * 1024
 EXPECTED_HEALTH = {"status": "ok", "service": "ai-support-agent"}
 EXPECTED_READINESS = {"status": "ok", "database": "ok"}
+API_RESOURCES = ("customers", "products", "licenses", "tickets")
 
 
 class SmokeTestError(Exception):
@@ -118,8 +119,63 @@ def json_object(body: bytes, endpoint: str) -> dict:
     return payload
 
 
-def run_checks(url: str, timeout: float, check_database: bool = False) -> None:
+def check_business_api(url: str, paths: dict, deadline: float) -> None:
+    """Проверить 12 операций в OpenAPI и четыре списка по настоящему HTTP.
+
+    Smoke ничего не записывает в БД: создание и ошибки транзакций проверяют
+    интеграционные тесты. Здесь проверяем маршруты собранного контейнера.
+    """
+    for resource in API_RESOURCES:
+        collection = f"/api/{resource}"
+        operations = paths.get(collection)
+        for method in ("get", "post"):
+            if not isinstance(operations, dict) or not isinstance(
+                operations.get(method), dict
+            ):
+                raise SmokeTestError(
+                    f"/openapi.json: отсутствует операция {method.upper()} {collection}"
+                )
+        # Имя параметра ({customer_id}, {id} и т. п.) не меняет контракт URL.
+        item_operations = [
+            operation
+            for path, operation in paths.items()
+            if path.startswith(collection + "/{")
+            and path.endswith("}")
+            and path.count("/") == 3
+        ]
+        if not any(
+            isinstance(operation, dict) and isinstance(operation.get("get"), dict)
+            for operation in item_operations
+        ):
+            raise SmokeTestError(
+                f"/openapi.json: отсутствует операция GET {collection}/{{id}}"
+            )
+        endpoint = f"{collection}?limit=1"
+        try:
+            records = json.loads(fetch(f"{url}{endpoint}", deadline).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SmokeTestError(
+                f"{endpoint}: ответ содержит невалидный JSON"
+            ) from error
+        if not isinstance(records, list) or len(records) > 1:
+            raise SmokeTestError(f"{endpoint}: ожидался JSON-массив длиной не более 1")
+        # bool в Python является int, но не может быть идентификатором записи.
+        if any(
+            not isinstance(record, dict)
+            or type(record.get("id")) is not int
+            or record["id"] <= 0
+            for record in records
+        ):
+            raise SmokeTestError(f"{endpoint}: ожидались объекты с положительным id")
+        print(f"OK {endpoint}: HTTP 200, список и операции GET/POST описаны")
+
+
+def run_checks(
+    url: str, timeout: float, check_database: bool = False, check_api: bool = False
+) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
+    # Предметное API требует БД, поэтому --check-api включает и /ready.
+    check_database = check_database or check_api
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -178,6 +234,9 @@ def run_checks(url: str, timeout: float, check_database: bool = False) -> None:
     else:
         print("OK /openapi.json: HTTP 200, title и операция GET /health")
 
+    if check_api:
+        check_business_api(url, paths, deadline)
+
 
 def main() -> int:
     """Прочитать CLI, вывести понятный результат и вернуть код для CI."""
@@ -199,9 +258,19 @@ def main() -> int:
         action="store_true",
         help="также проверить /ready и его описание в OpenAPI (этап 02)",
     )
+    parser.add_argument(
+        "--check-api",
+        action="store_true",
+        help="проверить готовность БД и API клиентов, продуктов, лицензий, обращений",
+    )
     args = parser.parse_args()
     try:
-        run_checks(args.base_url, args.timeout, check_database=args.check_database)
+        run_checks(
+            args.base_url,
+            args.timeout,
+            check_database=args.check_database,
+            check_api=args.check_api,
+        )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)
         return 1

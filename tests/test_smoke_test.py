@@ -16,9 +16,16 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
 
 
-def valid_responses(check_database: bool = False) -> dict[str, tuple[int, bytes]]:
+def valid_responses(
+    check_database: bool = False, check_api: bool = False
+) -> dict[str, tuple[int, bytes]]:
     """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
+    check_database = check_database or check_api
     paths = {"/health": {"get": {}}}
+    if check_api:
+        for resource in ("customers", "products", "licenses", "tickets"):
+            paths[f"/api/{resource}"] = {"get": {}, "post": {}}
+            paths[f"/api/{resource}/{{id}}"] = {"get": {}}
     if check_database:
         paths["/ready"] = {"get": {}}
     responses = {
@@ -39,6 +46,9 @@ def valid_responses(check_database: bool = False) -> dict[str, tuple[int, bytes]
     }
     if check_database:
         responses["/ready"] = (200, b'{"status": "ok", "database": "ok"}')
+    if check_api:
+        for resource in ("customers", "products", "licenses", "tickets"):
+            responses[f"/api/{resource}?limit=1"] = (200, b"[]")
     return responses
 
 
@@ -75,12 +85,14 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
 
 
 def run_smoke(
-    url: str, timeout: str = "2", check_database: bool = False
+    url: str, timeout: str = "2", check_database: bool = False, check_api: bool = False
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
     if check_database:
         command.append("--check-database")
+    if check_api:
+        command.append("--check-api")
     return subprocess.run(
         command,
         capture_output=True,
@@ -208,3 +220,64 @@ def test_cli_requires_readiness_operation_in_openapi(ready_path: object) -> None
     assert "GET /ready" in result.stderr
     assert requests["/ready"] == 1
     assert requests["/openapi.json"] == 1
+
+
+def test_cli_accepts_business_api_and_requires_readiness() -> None:
+    """Флаг API включает /ready, OpenAPI и четыре списка без POST-запросов."""
+    responses = valid_responses(check_api=True)
+    responses["/api/customers?limit=1"] = (200, b'[{"id": 7, "name": "Customer"}]')
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 0, result.stderr
+    assert requests == Counter({endpoint: 1 for endpoint in responses})
+    assert "OK /ready" in result.stdout
+    assert "OK /api/tickets?limit=1" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (b"not-json", "невалидный JSON"),
+        (b"{}", "JSON-массив"),
+        (b'[{"id": 1}, {"id": 2}]', "JSON-массив"),
+        (b'["ticket"]', "положительным id"),
+        (b'[{"id": true}]', "положительным id"),
+        (b'[{"id": 0}]', "положительным id"),
+    ],
+)
+def test_cli_rejects_invalid_business_list(body: bytes, message: str) -> None:
+    """Рабочие /health и /ready не скрывают ошибку предметного API."""
+    responses = valid_responses(check_api=True)
+    responses["/api/licenses?limit=1"] = (200, body)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert requests["/api/licenses?limit=1"] == 1
+    assert requests["/api/tickets?limit=1"] == 0
+
+
+@pytest.mark.parametrize("method", ["get", "post", "item"])
+def test_cli_rejects_missing_business_operation(method: str) -> None:
+    """Потеря любой из трёх операций ресурса блокирует публикацию образа."""
+    responses = valid_responses(check_api=True)
+    schema = json.loads(responses["/openapi.json"][1])
+    path = "/api/products/{id}" if method == "item" else "/api/products"
+    del schema["paths"][path]["get" if method == "item" else method]
+    responses["/openapi.json"] = (200, json.dumps(schema).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 1
+    assert "отсутствует операция" in result.stderr
+    assert requests["/api/products?limit=1"] == 0
+
+
+def test_cli_rejects_business_http_error_without_retry() -> None:
+    """Ошибка SQL/HTTP в списке немедленно завершает проверку контейнера."""
+    responses = valid_responses(check_api=True)
+    responses["/api/tickets?limit=1"] = (503, b'{"detail": "database unavailable"}')
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 1
+    assert "HTTP 503" in result.stderr
+    assert requests["/api/tickets?limit=1"] == 1

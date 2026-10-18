@@ -1,13 +1,14 @@
 # AI Support Agent
 
-**Начни с [инструкции этапа 02 на русском](docs/STAGE_02.md):**
-PostgreSQL, модели, миграции, запуск, демонстрационные данные и проверки.
+**Начни с [инструкции этапа 03 на русском](docs/STAGE_03.md):**
+создание клиентов, продуктов, лицензий и обращений через API.
+[Этап 02](docs/STAGE_02.md) объясняет PostgreSQL, модели, миграции и запуск.
 [Журнал разработки](docs/DEVELOPMENT_LOG.md) объясняет каждый выполненный шаг;
 [инструкция этапа 01](docs/STAGE_01.md) разбирает основу FastAPI.
 
 A Python learning project for a technical support assistant. The future product will help an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery.
 
-The current implementation covers **Stages 01–02**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, Alembic migrations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. Customer, license, and ticket REST operations are the next stage.
+The current implementation covers **Stages 01–03**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, Alembic migrations, twelve business API operations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. The API creates, lists, and reads customers, products, licenses, and tickets. LLM integration is the next stage.
 
 ## Requirements
 
@@ -38,7 +39,7 @@ Check the running stack through real HTTP:
 
 ```bash
 uv run --locked python scripts/smoke_test.py \
-  --base-url http://127.0.0.1:8001 --timeout 30 --check-database
+  --base-url http://127.0.0.1:8001 --timeout 30 --check-database --check-api
 ```
 
 Create fictional demonstration records, then read them from a new session:
@@ -58,6 +59,23 @@ docker compose down
 ```
 
 Ordinary `down` retains the named PostgreSQL volume and its records.
+
+## Work with the business API
+
+Open [Swagger UI](http://127.0.0.1:8001/docs). Each resource supports these operations:
+
+| Resource | Create | List | Read one |
+| --- | --- | --- | --- |
+| Customers | `POST /api/customers` | `GET /api/customers` | `GET /api/customers/{resource_id}` |
+| Products | `POST /api/products` | `GET /api/products` | `GET /api/products/{resource_id}` |
+| Licenses | `POST /api/licenses` | `GET /api/licenses` | `GET /api/licenses/{resource_id}` |
+| Tickets | `POST /api/tickets` | `GET /api/tickets` | `GET /api/tickets/{resource_id}` |
+
+Start by creating a customer and product. Use the returned IDs to create their license and ticket; existing demo records mean IDs may differ between machines. The [Russian Stage 03 guide](docs/STAGE_03.md) walks through complete requests and responses.
+
+Creation returns HTTP 201; reads return 200. Invalid input returns 422, an unknown record or missing creation reference returns 404, a duplicate unique value returns 409, and an unavailable database returns a safe 503. Lists return JSON arrays ordered by ID, with `offset=0` and `limit=20` by default (maximum 100). License lists support `customer_id`, `product_id`, and `license_key`; ticket lists support `customer_id`, `product_id`, and `status`. Filters without matches return an empty array.
+
+New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. This stage adds create/read operations; editing, deletion, authentication, and AI behavior belong to later work.
 
 ## Optional: run the API on the host
 
@@ -110,7 +128,7 @@ Docker build + Compose readiness + HTTP smoke + database persistence check
 Publish the tested image to GHCR (push to main only)
 ```
 
-The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks all four HTTP routes, and compares saved records before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
+The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks health/readiness, all twelve operations in OpenAPI and four resource lists through HTTP, and compares saved records before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
 
 Images use `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The current tip of `main` can also update `latest`. The workflow delivers an image to the registry; running it on an external server is a later step.
 
@@ -122,7 +140,12 @@ Images use `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The curren
 .github/workflows/
   ci.yml                 # Python/database checks, Compose and GHCR delivery
 app/
-  main.py                # /health and /ready, API lifecycle
+  main.py                # /health, /ready, API lifecycle and router registration
+  api/
+    routes.py            # Thin HTTP handlers for four resources
+    dependencies.py      # Request sessions and safe database errors
+  schemas/               # Validated create bodies and explicit read responses
+  services/              # Business checks, queries and explicit transactions
   config.py              # DATABASE_URL from environment or .env
   db/
     base.py              # DeclarativeBase and constraint naming
@@ -134,18 +157,19 @@ migrations/
   env.py                 # Alembic execution and database URL handling
   versions/              # Versioned schema creation and rollback
 tests/
-  integration/           # Real PostgreSQL and migration checks
+  integration/           # Real PostgreSQL, migrations and complete HTTP workflows
   test_health.py         # Standalone API behavior
   test_readiness.py      # Database readiness behavior
   test_config.py         # Environment configuration
   test_smoke_test.py     # Real HTTP smoke CLI regression tests
 scripts/
-  smoke_test.py          # Three HTTP checks; /ready with --check-database
+  smoke_test.py          # Health, readiness and business API checks
 docs/
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian
   STAGE_01.md            # FastAPI learning guide in Russian
   STAGE_02.md            # Database learning guide in Russian
+  STAGE_03.md            # Business API learning guide in Russian
   DEVELOPMENT_LOG.md     # Step-by-step implementation log
 compose.yaml             # PostgreSQL, migration, API and isolated test database
 alembic.ini              # Migration configuration without a stored database URL
@@ -163,7 +187,7 @@ README.md
 | --- | --- | --- |
 | 01 | Initialize Python project, FastAPI, health endpoint, first tests | Implemented; verify with the commands above |
 | 02 | PostgreSQL, SQLAlchemy models, Alembic migrations | Implemented; includes readiness, demo records and database checks |
-| 03 | Customer, license, and ticket REST APIs | Planned |
+| 03 | Customer, product, license, and ticket REST APIs | Implemented: create, list and read with PostgreSQL integration tests |
 | 04 | LLM API integration and error handling | Planned |
 | 05 | Tool calling and the agent execution loop | Planned |
 | 06 | RAG, embeddings, and Qdrant document search | Planned |
@@ -177,7 +201,8 @@ README.md
 - [Solution approach](docs/APPROACH.md)
 - [Stage 01 learning guide](docs/STAGE_01.md)
 - [Stage 02 learning guide](docs/STAGE_02.md)
+- [Stage 03 learning guide](docs/STAGE_03.md)
 - [Development log](docs/DEVELOPMENT_LOG.md)
 - [CI/CD and Docker guide](docs/CI_CD.md)
 
-TechFlow and the support scenarios are fictional. The current implementation requires no LLM API key. Database-backed functionality is limited to readiness and explicit demonstration commands; the product REST APIs and AI behavior remain future work.
+TechFlow and the support scenarios are fictional. The current implementation requires no LLM API key. The business API persists customer, product, license, and ticket records. AI behavior, authentication, and an operator interface remain future work.

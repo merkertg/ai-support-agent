@@ -6,14 +6,15 @@ Support operators need customer information, license details, and technical docu
 
 The project uses fictional TechFlow products and artificial support data.
 
-## Current implementation: Stages 01–02
+## Current implementation: Stages 01–03
 
-The application now has a runnable HTTP foundation and a persistent relational schema. Its current database operations are a readiness query and explicit demonstration commands. Product REST APIs will be introduced in Stage 03.
+The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets.
 
 ```text
 HTTP client → Uvicorn → FastAPI
                          ├─ GET /health → application status
                          ├─ GET /ready  → PostgreSQL + Alembic revision check
+                         ├─ /api/* → routers → services → PostgreSQL
                          └─ /docs and /openapi.json → API documentation
 
 Explicit demo CLI → SQLAlchemy session → PostgreSQL
@@ -64,6 +65,20 @@ Knowledge documents store metadata rather than a second copy of future Markdown 
 
 `updated_at` is initialized by PostgreSQL and updated by SQLAlchemy when it issues an update for the mapped record. Direct SQL updates must set it explicitly; this stage creates no timestamp trigger.
 
+## Business API and transaction boundaries
+
+Stage 03 adds `app/schemas`, `app/services`, and `app/api` while keeping the existing schema. No new migration is needed: the nine Stage 02 models already describe the stored fields.
+
+Pydantic create schemas trim strings, reject empty required fields and unknown fields, validate email addresses, restrict enum values, and require positive identifiers and time-zone-aware license dates. Read schemas explicitly describe public response fields and read attributes from SQLAlchemy objects. Request clients cannot assign database IDs, creation timestamps, or the initial ticket status.
+
+Twelve operations create, list, and read one record for each of `/api/customers`, `/api/products`, `/api/licenses`, and `/api/tickets`. List queries order by ID and bound pagination to at most 100 results. License and ticket queries support documented filters. A filter with no matching records returns `[]`.
+
+HTTP handlers call services rather than embedding business rules. Services check referenced records, add data, commit explicitly, and refresh the saved object before serialization. The session dependency rolls back failed transactions and closes sessions. Duplicate unique values return HTTP 409; missing records or creation references return 404; invalid request data returns 422. Database and configuration failures return a generic 503 without revealing URLs, SQL statements, or parameters.
+
+Ticket creation always uses `open`; later status transitions are outside this stage. License issuance defaults to current UTC time when omitted, and expiry cannot precede issuance. A ticket references its customer and product; no ticket-to-license column or automatic license entitlement policy is invented. Later agent tools can inspect a license independently.
+
+The [Stage 03 guide](STAGE_03.md) explains each schema, service, handler, HTTP request, and error. Every new function has a Russian docstring; inline comments explain transaction and validation decisions. This remains a local learning application without authentication, editing, deletion, or AI execution.
+
 ## Schema lifecycle and local startup
 
 The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. Runtime startup never calls `Base.metadata.create_all()`.
@@ -95,7 +110,7 @@ Run lint, formatting, and the full test suite using the commands in the [README]
 
 `.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. The Python job installs locked dependencies, starts its PostgreSQL 17 service, applies migrations, checks schema drift with `alembic check`, runs Ruff lint and formatting checks, and executes all Pytest tests against the explicit test database. The independent lint, formatting, and test steps still report their outcomes if another check fails.
 
-After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-database` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, compares it with the original, and checks HTTP readiness again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
+After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-database --check-api` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, compares it with the original, and checks HTTP readiness again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
 
 The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration and migrations. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
 
@@ -121,8 +136,8 @@ FastAPI routes → business services → repositories → PostgreSQL
 
 The interface will communicate through the API. Server-side services will enforce access rules and expose a restricted set of agent tools. The agent will prepare a suggestion for human review. LangGraph will be introduced after a basic tool-calling loop is understood and implemented.
 
-PostgreSQL and its schema are now implemented. REST business operations, Qdrant, LLM integration, agent tools, authentication, human review, and the operator interface remain future work.
+PostgreSQL, its schema, and create/read REST business operations are implemented. Qdrant, LLM integration, agent tools, authentication, human review, and the operator interface remain future work.
 
 ## Next step
 
-Stage 03 will add customer, license, and ticket REST APIs using the existing models and explicit transaction handling. Its first useful scenario is creating a customer, assigning a license, opening a ticket, and reading the records through `/docs`. Later stages add LLM integration, tool calling, RAG, human review, and the operator interface in the existing roadmap order.
+Stage 04 will add the first LLM integration with configurable credentials, timeouts, safe errors, and deterministic test substitutes. The current create-customer → create-product → issue-license → open-ticket scenario provides real records for later tools. Tool calling, RAG, human review, and the operator interface follow the existing roadmap order.

@@ -142,7 +142,7 @@ jobs:
       - name: Check HTTP endpoints and database readiness
         run: |
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-database
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-database --check-api
 
       # Подтверждаем, что данные находятся в постоянном томе PostgreSQL.
       # После пересоздания контейнеров только читаем: seed мог бы скрыть потерю.
@@ -158,7 +158,7 @@ jobs:
             python -m app.db.demo show > after.json
           cmp before.json after.json
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-database
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-database --check-api
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image

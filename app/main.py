@@ -14,7 +14,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.errors import database_error_handler, resource_error_handler
+from app.api.routes import router as api_router
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_session
+from app.services.errors import ResourceError
 
 # Путь не зависит от каталога, из которого запущен Uvicorn.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,3 +113,9 @@ def ready(
     if not expected_revisions or current_revisions != expected_revisions:
         raise HTTPException(status_code=503, detail=READINESS_ERROR)
     return {"status": "ok", "database": "ok"}
+
+
+# REST-слой подключаем отдельно: проверки /health и /ready сохраняют свой контракт.
+app.include_router(api_router)
+app.add_exception_handler(ResourceError, resource_error_handler)
+app.add_exception_handler(SQLAlchemyError, database_error_handler)
