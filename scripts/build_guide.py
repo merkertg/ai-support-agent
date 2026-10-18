@@ -3156,6 +3156,16 @@ def append_audit_pages(story, verification):
             BODY_S,
         ),
         Spacer(1, 9),
+        p("Обновить стенд до новой версии", H2),
+        code_block("docker compose up --build --detach --wait --wait-timeout 180 ui"),
+        Spacer(1, 5),
+        p(
+            "Без down: Compose пересобирает образы, применяет миграции и пересоздаёт "
+            "только изменившиеся контейнеры; тома остаются. Так обновлён "
+            "development-стенд: снимок 14 таблиц до и после совпал.",
+            BODY_S,
+        ),
+        Spacer(1, 9),
         p("Проверить ожидающий процесс", H2),
         p(
             "Создай анализ и сохрани run_id, оставив предложение "
@@ -3195,9 +3205,14 @@ def append_audit_pages(story, verification):
             ["Симптом", "Что проверить", "Следующее действие"],
             [
                 (
-                    "Docker daemon недоступен",
+                    "Нет docker.sock, dependency failed",
                     "Docker Desktop и docker version",
-                    "Запустить Docker, дождаться готовности",
+                    "Запустить Docker и повторить up; тома целы",
+                ),
+                (
+                    "UI: нет соединения с API",
+                    "compose ps; API_URL=http://api:8000",
+                    "Дождаться healthy api, обновить страницу",
                 ),
                 (
                     "Порт занят",
@@ -3262,7 +3277,7 @@ def append_audit_pages(story, verification):
         code_block(
             "docker compose ps --all\n"
             "docker compose logs --no-color --tail 100 \\\n"
-            "  api migrate db qdrant\n"
+            "  api ui migrate db qdrant\n"
             "docker compose exec -T api python -m alembic current"
         ),
         Spacer(1, 9),

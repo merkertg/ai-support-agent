@@ -62,6 +62,20 @@ docker compose down
 
 Ordinary `down` retains the named PostgreSQL and Qdrant volumes and their data.
 
+## Update an existing stack
+
+After pulling new code, rebuild and restart without `down`:
+
+```bash
+docker compose up --build --detach --wait --wait-timeout 180 ui
+curl --silent --show-error --fail-with-body http://127.0.0.1:8001/ready
+curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/knowledge/status
+```
+
+Compose rebuilds the API and UI images, applies pending migrations through `migrate`, and recreates only the containers whose image or settings changed. The PostgreSQL and Qdrant volumes are reused, so records, waiting reviews, and the search index survive. Run `ingest` again only when articles changed; unchanged articles are skipped. Never add `--volumes` to `down` on a stack whose data you need.
+
+If the command stops with `dependency failed to start` or a missing `docker.sock`, Docker Desktop itself has stopped. Start it, wait until `docker version` shows the server, and run the same command again; the volumes are not affected.
+
 ## Optional: run the API on the host
 
 For Python development with automatic reload, start PostgreSQL and Qdrant in Docker and run the API from `.venv`. `.env` contains separate URLs for host Python (`127.0.0.1:5433`) and Compose services (`db:5432`). Host knowledge search uses `QDRANT_URL=http://127.0.0.1:6335`; Compose uses `QDRANT_URL_DOCKER=http://qdrant:6333`. These values are included in `.env.example`.

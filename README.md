@@ -25,7 +25,7 @@ The project implements **all ten stages**: a FastAPI service with PostgreSQL 17 
 
 Instructions ([docs/instructions/](docs/instructions/)):
 
-- [Quickstart](docs/instructions/quickstart.md): requirements, Compose stack with the operator UI, knowledge base indexing, host run
+- [Quickstart](docs/instructions/quickstart.md): requirements, Compose stack with the operator UI, updating an existing stack, knowledge base indexing, host run
 - [Using the API](docs/instructions/usage.md): business records, draft previews, knowledge search, agent, human review
 - [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, offline evaluations
 - [CI and delivery to GHCR](docs/instructions/ci-and-delivery.md)
