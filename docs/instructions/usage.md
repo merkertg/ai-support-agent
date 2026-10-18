@@ -79,3 +79,27 @@ uv run --locked python scripts/smoke_test.py \
 ```
 
 `--check-agent` includes `--check-llm` and the read-only `--check-knowledge` (which requires an indexed knowledge base) and additionally creates a fictional license, an agent run, and a suggestion that must cite a found article. The [Stage 06 guide](../STAGE_06.md) covers the knowledge base; the [Stage 05 guide](../STAGE_05.md) walks through each request, the saved trace, error handling, migration `0002_agent_runtime`, and the OpenAI adapter, which is tested only with a substituted HTTP transport.
+
+## Review suggestions (human in the loop)
+
+Since Stage 07, `POST /api/tickets/{resource_id}/analyze` is the first node of a LangGraph workflow. After analysis the graph pauses at `human_review` and stores its state in PostgreSQL (`checkpoint_*` tables created by migration `0004_review_workflow`). The run response contains `workflow_thread_id`; `GET /api/agent-runs/{resource_id}/workflow` shows `awaiting_review`, `delivered`, `rejected`, or `failed`.
+
+Create an employee, list pending suggestions, and decide:
+
+```bash
+curl --silent --show-error --fail-with-body --request POST http://127.0.0.1:8001/api/users \
+  --header 'Content-Type: application/json' --data '{"name":"Operator","email":"operator@example.com"}'
+curl --silent --show-error --fail-with-body 'http://127.0.0.1:8001/api/suggestions?status=pending'
+curl --silent --show-error --fail-with-body --request POST \
+  http://127.0.0.1:8001/api/suggestions/1/review --header 'Content-Type: application/json' \
+  --data '{"decision":"approve","reviewer_id":1,"final_content":"Hello! Please check port 8443."}'
+```
+
+`approve` may replace the text with `final_content`; it creates a ticket message from the employee (simulated delivery, no email is sent) and moves the ticket to `waiting_customer`. `reject` requires a `comment` and changes nothing in the ticket. A suggestion is decided once: a second decision returns 409. Invalid or inactive reviewers are rejected before the workflow resumes, so it keeps waiting. `reviewer_id` is not authentication. Suggestions created before Stage 07 have no workflow and are decided directly.
+
+```bash
+uv run --locked python scripts/smoke_test.py \
+  --base-url http://127.0.0.1:8001 --timeout 60 --check-review
+```
+
+`--check-review` includes `--check-agent` and additionally approves the new suggestion, checks the delivered message, the ticket status, the `delivered` workflow, and the 409 on a repeated decision. `--review-run RUN_ID` performs the same checks for an existing waiting run. The [Stage 07 guide](../STAGE_07.md) explains the graph, checkpoints, and reliability rules.

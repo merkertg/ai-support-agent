@@ -36,6 +36,7 @@ Description = Annotated[
 LicenseStatus = Literal["active", "expired", "revoked"]
 TicketPriority = Literal["low", "medium", "high", "critical"]
 TicketStatus = Literal["open", "in_progress", "waiting_customer", "resolved", "closed"]
+UserRole = Literal["operator", "admin"]
 
 
 class CreateSchema(BaseModel):
@@ -139,6 +140,25 @@ class TicketRead(ReadSchema):
     status: TicketStatus
     created_at: datetime
     updated_at: datetime
+
+
+class UserCreate(CreateSchema):
+    """Сотрудник поддержки; пароля и входа в систему на этом этапе нет."""
+
+    name: Name
+    email: Annotated[EmailStr, Field(max_length=320)]
+    role: UserRole = "operator"
+
+
+class UserRead(ReadSchema):
+    """Публичные поля сотрудника, который может рассматривать предложения."""
+
+    id: int
+    name: str
+    email: str
+    role: UserRole
+    is_active: bool
+    created_at: datetime
 
 
 class ErrorRead(ReadSchema):

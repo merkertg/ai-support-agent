@@ -20,11 +20,13 @@ from app.api.drafts import llm_error_handler
 from app.api.drafts import router as drafts_router
 from app.api.errors import database_error_handler, resource_error_handler
 from app.api.knowledge import router as knowledge_router
+from app.api.reviews import router as reviews_router
 from app.api.routes import router as api_router
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_session
 from app.llm.errors import LLMError
 from app.services.agents import AgentRunFailure
 from app.services.errors import ResourceError
+from app.workflow.checkpoint import close_checkpointer
 
 # Путь не зависит от каталога, из которого запущен Uvicorn.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         dispose_engine()
+        close_checkpointer()
 
 
 def get_readiness_session() -> Iterator[Session]:
@@ -127,6 +130,7 @@ app.include_router(api_router)
 app.include_router(drafts_router)
 app.include_router(agents_router)
 app.include_router(knowledge_router)
+app.include_router(reviews_router)
 app.add_exception_handler(AgentRunFailure, agent_error_handler)
 app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(ResourceError, resource_error_handler)

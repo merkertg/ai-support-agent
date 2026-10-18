@@ -36,6 +36,13 @@ EXPECTED_TABLES = {
     "agent_runs",
     "agent_suggestions",
 }
+# Таблицы checkpointer LangGraph (миграция 0004) не имеют SQLAlchemy-моделей.
+CHECKPOINT_TABLES = {
+    "checkpoint_migrations",
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+}
 
 
 @pytest.fixture
@@ -98,16 +105,16 @@ def test_migrations_round_trip_and_no_model_drift(
     migration_config: Config,
 ) -> None:
     """Доказать upgrade, отсутствие дрейфа моделей, downgrade и повторный upgrade."""
-    assert set(inspect(migrated_engine).get_table_names()) == EXPECTED_TABLES | {
-        "alembic_version"
-    }
+    assert set(inspect(migrated_engine).get_table_names()) == (
+        EXPECTED_TABLES | CHECKPOINT_TABLES | {"alembic_version"}
+    )
     command.check(migration_config)
     command.downgrade(migration_config, "base")
     assert set(inspect(migrated_engine).get_table_names()) <= {"alembic_version"}
     command.upgrade(migration_config, "head")
-    assert set(inspect(migrated_engine).get_table_names()) == EXPECTED_TABLES | {
-        "alembic_version"
-    }
+    assert set(inspect(migrated_engine).get_table_names()) == (
+        EXPECTED_TABLES | CHECKPOINT_TABLES | {"alembic_version"}
+    )
     command.check(migration_config)
 
 

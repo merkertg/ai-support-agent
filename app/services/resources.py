@@ -1,4 +1,4 @@
-"""Чтение и создание клиентов, продуктов, лицензий и обращений.
+"""Чтение и создание клиентов, продуктов, лицензий, обращений и сотрудников.
 
 Маршруты передают сюда проверенные схемы и сессию запроса. Сервис явно
 фиксирует запись и переводит только известные ограничения PostgreSQL
@@ -9,18 +9,19 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import Customer, License, Product, Ticket
+from app.models import Customer, License, Product, Ticket, User
 from app.schemas.resources import (
     CustomerCreate,
     LicenseCreate,
     ProductCreate,
     TicketCreate,
     TicketStatus,
+    UserCreate,
 )
 from app.services.errors import ResourceConflict, ResourceNotFound
 
 
-def _persist[Entity: (Customer, Product, License, Ticket)](
+def _persist[Entity: (Customer, Product, License, Ticket, User)](
     session: Session, entity: Entity
 ) -> Entity:
     """Сохранить одну запись и загрузить созданные БД id и времена.
@@ -51,7 +52,7 @@ def _persist[Entity: (Customer, Product, License, Ticket)](
     return entity
 
 
-def _get[Entity: (Customer, Product, License, Ticket)](
+def _get[Entity: (Customer, Product, License, Ticket, User)](
     session: Session, model: type[Entity], resource_id: int, message: str
 ) -> Entity:
     """Найти запись по первичному ключу или вернуть понятную ошибку ресурса."""
@@ -167,3 +168,19 @@ def list_tickets(
 def get_ticket(session: Session, resource_id: int) -> Ticket:
     """Вернуть одно обращение или ошибку отсутствующего ресурса."""
     return _get(session, Ticket, resource_id, "Обращение не найдено")
+
+
+def create_user(session: Session, payload: UserCreate) -> User:
+    """Создать сотрудника; повторяющийся email приводит к конфликту 409."""
+    return _persist(session, User(**payload.model_dump()))
+
+
+def list_users(session: Session, *, offset: int = 0, limit: int = 20) -> list[User]:
+    """Прочитать страницу сотрудников в порядке id."""
+    statement = select(User).order_by(User.id).offset(offset).limit(limit)
+    return list(session.scalars(statement))
+
+
+def get_user(session: Session, resource_id: int) -> User:
+    """Вернуть сотрудника или ошибку отсутствующего ресурса."""
+    return _get(session, User, resource_id, "Сотрудник не найден")

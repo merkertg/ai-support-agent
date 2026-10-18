@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Query, status
 
 from app.api.dependencies import ApiSession
-from app.models import Customer, License, Product, Ticket
+from app.models import Customer, License, Product, Ticket, User
 from app.schemas.resources import (
     MAX_ID,
     CustomerCreate,
@@ -20,6 +20,8 @@ from app.schemas.resources import (
     TicketCreate,
     TicketRead,
     TicketStatus,
+    UserCreate,
+    UserRead,
 )
 from app.services import resources
 
@@ -165,3 +167,28 @@ def list_tickets(
 def get_ticket(resource_id: ResourceId, session: ApiSession) -> Ticket:
     """Прочитать одно обращение без изменений его состояния."""
     return resources.get_ticket(session, resource_id)
+
+
+@router.post(
+    "/users",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Users"],
+)
+def create_user(payload: UserCreate, session: ApiSession) -> User:
+    """Создать сотрудника поддержки, который будет рассматривать предложения."""
+    return resources.create_user(session, payload)
+
+
+@router.get("/users", response_model=list[UserRead], tags=["Users"])
+def list_users(
+    session: ApiSession, offset: Offset = 0, limit: Limit = 20
+) -> list[User]:
+    """Прочитать страницу сотрудников."""
+    return resources.list_users(session, offset=offset, limit=limit)
+
+
+@router.get("/users/{resource_id}", response_model=UserRead, tags=["Users"])
+def get_user(resource_id: ResourceId, session: ApiSession) -> User:
+    """Прочитать сотрудника по id."""
+    return resources.get_user(session, resource_id)

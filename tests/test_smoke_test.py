@@ -62,8 +62,12 @@ def valid_responses(
     check_llm: bool = False,
     check_agent: bool = False,
     check_knowledge: bool = False,
+    check_review: bool = False,
+    review_body: dict | None = None,
+    repeat_status: int = 409,
 ) -> dict:
     """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
+    check_agent = check_agent or check_review
     check_llm = check_llm or check_agent
     check_knowledge = check_knowledge or check_agent
     check_api = check_api or check_llm or check_knowledge
@@ -82,6 +86,8 @@ def valid_responses(
     if check_agent:
         paths["/api/tickets/{resource_id}/analyze"] = {"post": {}}
         paths["/api/agent-runs/{resource_id}"] = {"get": {}}
+    if check_review:
+        paths.update(REVIEW_PATHS)
     if check_database:
         paths["/ready"] = {"get": {}}
     responses = {
@@ -153,7 +159,80 @@ def valid_responses(
                 "/api/agent-runs/21": (200, run),
             }
         )
+    if check_review:
+        add_review_responses(responses, review_body, repeat_status)
     return responses
+
+
+REVIEW_TEXT = "Smoke: ответ проверен и одобрен оператором."
+REVIEW_PATHS = {
+    "/api/users": {"get": {}, "post": {}},
+    "/api/agent-runs/{resource_id}/workflow": {"get": {}},
+    "/api/suggestions/{resource_id}/review": {"post": {}},
+}
+WAITING = {
+    "thread_id": "thread-21",
+    "state": "awaiting_review",
+    "next": ["human_review"],
+    "run_id": 21,
+    "suggestion_id": 31,
+}
+
+
+def review_result(reviewer_id: int) -> dict:
+    """Ответ API на одобрение: предложение, сообщение, статус и итог графа."""
+    return {
+        "suggestion": {
+            "id": 31,
+            "agent_run_id": 21,
+            "ticket_id": 13,
+            "status": "approved",
+            "reviewed_by": reviewer_id,
+            "final_content": REVIEW_TEXT,
+            "delivered_message_id": 51,
+        },
+        "message": {
+            "id": 51,
+            "ticket_id": 13,
+            "user_id": reviewer_id,
+            "author_type": "operator",
+            "content": REVIEW_TEXT,
+        },
+        "ticket_status": "waiting_customer",
+        "workflow": WAITING | {"state": "delivered", "next": []},
+    }
+
+
+def add_review_responses(
+    responses: dict, result: dict | None = None, repeat_status: int = 409
+) -> None:
+    """Первое решение одобряет, повторное получает 409; затем обращение ждёт клиента."""
+    state = {"reviewed": False}
+    open_ticket = responses.get("/api/tickets/13", (200, b'{"id":13,"status":"open"}'))
+
+    def ticket(body: dict) -> tuple[int, bytes]:
+        """Показать статус обращения до и после доставки ответа."""
+        if state["reviewed"]:
+            return 200, b'{"id":13,"status":"waiting_customer"}'
+        return open_ticket
+
+    def review(body: dict) -> tuple[int, bytes]:
+        """Применить решение один раз, как advisory lock и FOR UPDATE в API."""
+        value = result if result is not None else review_result(body["reviewer_id"])
+        if state["reviewed"] and repeat_status == 409:
+            # Smoke проверяет только код 409; текст ошибки здесь не важен.
+            return 409, b'{"detail":"conflict"}'
+        state["reviewed"] = True
+        return 200, json.dumps(value).encode()
+
+    responses.update(
+        {
+            "/api/users": (201, b'{"id":41}'),
+            "/api/agent-runs/21/workflow": (200, json.dumps(WAITING).encode()),
+            "/api/suggestions/31/review": review,
+            "/api/tickets/13": ticket,
+        }
+    )
 
 
 def agent_run() -> dict:
@@ -207,6 +286,7 @@ def agent_run() -> dict:
             "status": "pending",
             "requires_human_review": True,
         },
+        "workflow_thread_id": "thread-21",
     }
 
 
@@ -260,6 +340,8 @@ def run_smoke(
     check_llm: bool = False,
     check_agent: bool = False,
     check_knowledge: bool = False,
+    check_review: bool = False,
+    review_run: int | None = None,
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
@@ -273,6 +355,10 @@ def run_smoke(
         command.append("--check-agent")
     if check_knowledge:
         command.append("--check-knowledge")
+    if check_review:
+        command.append("--check-review")
+    if review_run is not None:
+        command.extend(["--review-run", str(review_run)])
     return subprocess.run(
         command,
         capture_output=True,
@@ -726,3 +812,89 @@ def test_cli_rejects_other_product_leak() -> None:
         result = run_smoke(url, check_knowledge=True)
     assert result.returncode == 1
     assert "другого продукта" in result.stderr
+
+
+def test_cli_checks_review_delivery_and_conflict() -> None:
+    """--check-review одобряет предложение, проверяет доставку и 409 на повтор."""
+    responses = valid_responses(check_review=True)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 0, result.stderr
+    assert requests["/api/suggestions/31/review"] == 2
+    assert requests["/api/agent-runs/21/workflow"] == 1
+    assert requests["/api/users"] == 1
+    # Обращение: после черновика, после анализа и после доставки ответа.
+    assert requests["/api/tickets/13"] == 3
+    assert "повторное решение получает 409" in result.stdout
+
+
+def test_cli_refuses_review_when_graph_is_not_waiting() -> None:
+    """Если граф не ждёт решения, сотрудник и решение не создаются."""
+    responses = valid_responses(check_review=True)
+    responses["/api/agent-runs/21/workflow"] = (
+        200,
+        json.dumps(WAITING | {"state": "delivered", "next": []}).encode(),
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 1
+    assert "не ожидает решения" in result.stderr
+    assert requests["/api/users"] == 0
+    assert requests["/api/suggestions/31/review"] == 0
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("suggestion", "status"), "rejected"),
+        (("suggestion", "final_content"), "Другой текст"),
+        (("message", "author_type"), "agent"),
+        (("message", "user_id"), 99),
+        (("ticket_status",), "open"),
+        (("workflow", "state"), "awaiting_review"),
+    ],
+)
+def test_cli_rejects_wrong_review_result(path: tuple, value) -> None:
+    """Неверное решение, автор, текст, статус или итог графа блокируют выпуск."""
+    result_body = review_result(41)
+    target = result_body
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    responses = valid_responses(check_review=True, review_body=result_body)
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 1
+    assert "неверный итог одобрения" in result.stderr
+
+
+def test_cli_requires_conflict_for_second_decision() -> None:
+    """Если повторное решение тоже принято, двойная доставка не обнаружится."""
+    responses = valid_responses(check_review=True, repeat_status=200)
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 1
+    assert "повторное решение не отклонено" in result.stderr
+
+
+def test_cli_review_run_continues_existing_workflow() -> None:
+    """--review-run рассматривает уже сохранённый запуск без нового анализа."""
+    responses = valid_responses(check_api=True)
+    responses["/api/agent-runs/21"] = (200, json.dumps(agent_run()).encode())
+    schema = json.loads(responses["/openapi.json"][1])
+    schema["paths"].update(REVIEW_PATHS)
+    responses["/openapi.json"] = (200, json.dumps(schema).encode())
+    add_review_responses(responses)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, review_run=21)
+    assert result.returncode == 0, result.stderr
+    assert requests["/api/tickets/13/analyze"] == 0
+    assert requests["/api/suggestions/31/review"] == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "abc"])
+def test_cli_rejects_invalid_review_run_id(value: str) -> None:
+    """Неверный id запуска — ошибка аргументов с кодом 2."""
+    command = [sys.executable, str(SCRIPT), "--review-run", value]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2

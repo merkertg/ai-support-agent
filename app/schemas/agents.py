@@ -42,6 +42,8 @@ class AgentRunRead(BaseModel):
     usage: TokenUsage | None
     result: AgentResultRead | None
     suggestion: SuggestionRead | None
+    # Поток LangGraph процесса проверки; None — запуск создан до этапа 07.
+    workflow_thread_id: str | None = None
 
 
 class AgentErrorRead(BaseModel):

@@ -368,3 +368,56 @@ Mock-эмбеддинг лексический: находит тексты с �
 
 Удалённый запуск Actions для коммита этапа 06 и публикация образа в GHCR
 требуют собственного подтверждения; локальные проверки их не заменяют.
+
+## 2026-10-18 — этап 07: процесс LangGraph и решение сотрудника
+
+Цель: провести предложение агента через решение человека — одобрить с учебной
+доставкой или отклонить — в процессе LangGraph, состояние которого переживает
+перезапуск API. Подробная инструкция: [STAGE_07.md](STAGE_07.md).
+
+| Шаг | Что изменено | Файлы | Проверка и результат |
+| --- | --- | --- | --- |
+| 1. Зависимости | `langgraph` 1.2.12 и `langgraph-checkpoint-postgres` 3.1.2; транзитивные версии закреплены не новее 2026-10-03. `websockets` 17.2 → 16.1.1 по требованию `langgraph-sdk` (`<17`). | `pyproject.toml`, `uv.lock` | `uv lock`/`uv lock --check` в контейнере `uv` 0.13.1; все 22 изменённых пакета выпущены до 2026-10-04. `.venv` обновлён pip по хешам, `pip check` без ошибок. |
+| 2. Схема | Миграция `0004_review_workflow`: `workflow_thread_id`, `final_content`, `review_comment`, `delivered_message_id`, два CHECK; таблицы `checkpoint_*` — замороженная копия DDL библиотеки. `alembic check` исключает их. | `migrations/versions/0004_review_workflow.py`, `migrations/env.py`, `app/models/entities.py` | upgrade/check/downgrade/upgrade на тестовой БД; `0003 → 0004` сохраняет строки; `setup()` после миграции ничего не меняет; DDL совпадает с `BasePostgresSaver.MIGRATIONS`. |
+| 3. Сотрудники | `POST/GET /api/users`, `GET /api/users/{id}`. | `app/api/routes.py`, `app/schemas/resources.py`, `app/services/resources.py` | Валидация и интеграционные создание/чтение/409. |
+| 4. Решение | Очередь, чтение, проверка до продолжения, атомарное одобрение (сообщение оператора + `waiting_customer`) или отклонение с причиной; `FOR UPDATE`. | `app/services/reviews.py`, `app/schemas/reviews.py` | Интеграционно: одобрение с правкой, отклонение, неверный/неактивный сотрудник, повтор 409, CHECK. |
+| 5. Граф | `analyze → human_review (interrupt) → deliver / reject`; состояние только из id и итогов; контекст выполнения для зависимостей. | `app/workflow/graph.py` | 10 unit-сценариев на `InMemorySaver`: остановка, обе ветви, `failed`, повторный resume, ключ лицензии вне checkpoint, удаление пустого потока. |
+| 6. Checkpointer и сервис | `PostgresSaver` на пуле psycopg; запуск, чтение состояния, advisory lock и `review_id` против двойного решения; старые предложения без потока. | `app/workflow/checkpoint.py`, `app/workflow/service.py` | 15 интеграционных сценариев на настоящем `PostgresSaver`, включая новый пул (перезапуск) и два параллельных решения — ровно одна доставка. |
+| 7. HTTP | `/analyze` запускает граф; `GET /api/agent-runs/{id}/workflow`; `GET /api/suggestions`, `GET /api/suggestions/{id}`, `POST /api/suggestions/{id}/review`. | `app/api/agents.py`, `app/api/reviews.py`, `app/main.py`, `app/schemas/agents.py` | 22 HTTP unit-сценария; 27 тестов API агента этапа 05 проходят через граф без изменений, кроме конструктора ошибки. |
+| 8. Тестовая изоляция | Общая фикстура: checkpointer в памяти для каждого теста. | `tests/conftest.py` | Без неё `/analyze` в unit-тестах писал бы checkpoint в development-БД из `.env`. |
+| 9. Smoke и CI | `--check-review` и `--review-run`; ожидаемый 4xx в `fetch`; CI оставляет граф в ожидании и продолжает его после пересоздания контейнеров. `LANGSMITH_TRACING=false` в Compose. | `scripts/smoke_test.py`, `tests/test_smoke_test.py`, `.github/workflows/ci.yml`, `compose.yaml` | Smoke CLI: **89 passed**, 13 новых. Контейнерное задание воспроизведено локально (см. ниже). |
+| 10. Документация | Инструкция этапа 07; README, инструкции, архитектура, CI/CD. | `docs/STAGE_07.md`, `README.md`, `docs/instructions/*`, `docs/APPROACH.md`, `docs/CI_CD.md` | Ссылки, блоки кода и `bash -n` проверены; учебный проход выполнен дословно. |
+
+### Подтверждённые локальные результаты этапа 07
+
+- Ruff без замечаний; форматирование 106 Python-файлов прошло проверку.
+- Полный Pytest на `ai_support_test` и `qdrant-test` с `CI=true`:
+  **597 passed, 0 skipped**, 61.23 секунды. К 537 сценариям этапа 06 добавлено
+  **60**: 10 графа, 22 HTTP, 15 интеграционных и 13 smoke CLI.
+  Отдельно: unit 490 passed, интеграционные 107 passed.
+- Образ собран с `--pull`: внутри `langgraph` 1.2.12 и `langgraph-checkpoint-postgres`
+  3.1.2, `alembic current` — `0004_review_workflow (head)`, `alembic check` без операций.
+- В изолированном Compose-проекте `--check-review` прошёл: граф на `human_review`,
+  одобрение с правкой, сообщение оператора, `waiting_customer`, `delivered`, `409`.
+  Затем `--check-agent` оставил запуск 2 в ожидании. После `down` без удаления
+  томов и нового `up` (новые ID контейнеров `api` и `db`) совпали демо-данные,
+  рассмотренный запуск и выдача поиска, повторная индексация ничего не изменила,
+  а `--review-run 2` продолжил отложенный граф в новых контейнерах. Финальный
+  `--check-review` прошёл. Проект и тома удалены.
+- Учебный проход `STAGE_07.md` (разделы 9–10, 5 Bash-блоков) выполнен дословно
+  с `set -euo pipefail`, включая `docker compose restart api` между анализом
+  и отклонением.
+- Development-стенд на `8001` обновлён: миграция `0003 → 0004`; предметные
+  записи не изменились (3 клиента, 2 обращения, 0 запусков, 0 сообщений,
+  7 статей реестра). Выполнен только читающий smoke `--check-knowledge`.
+- actionlint не запускался: он не установлен локально.
+
+### Граница и честность проверки этапа 07
+
+`reviewer_id` — учебная отметка, а не авторизация: API не проверяет, кто
+отправил решение. Доставка — сообщение обращения в PostgreSQL; письма не
+отправляются. Цикл инструментов агента остался прежним; LangGraph управляет
+процессом вокруг него. Реальная модель OpenAI по-прежнему не вызывалась.
+
+Удалённый запуск Actions для коммита этапа 07 и публикация образа в GHCR
+требуют собственного подтверждения; локальные проверки их не заменяют.

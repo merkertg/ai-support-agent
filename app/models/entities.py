@@ -225,6 +225,8 @@ class AgentRun(Base):
     )
     usage: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Поток LangGraph, в котором предложение ждёт решения сотрудника.
+    workflow_thread_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -233,7 +235,7 @@ class AgentRun(Base):
 
 
 class AgentSuggestion(Base):
-    """Черновик агента: pending ожидает решения сотрудника и не отправляется."""
+    """Черновик агента: pending ждёт решения; approved доставлен, rejected — нет."""
 
     __tablename__ = "agent_suggestions"
     __table_args__ = (
@@ -244,6 +246,13 @@ class AgentSuggestion(Base):
             "OR (status IN ('approved', 'rejected') AND reviewed_by IS NOT NULL "
             "AND reviewed_at IS NOT NULL)",
             name="review",
+        ),
+        # Итоговый текст и доставленное сообщение бывают только у одобренного.
+        CheckConstraint(
+            "final_content IS NULL OR status = 'approved'", name="final_content"
+        ),
+        CheckConstraint(
+            "delivered_message_id IS NULL OR status = 'approved'", name="delivery"
         ),
     )
 
@@ -260,6 +269,13 @@ class AgentSuggestion(Base):
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Текст, который сотрудник одобрил (возможно, отредактировав черновик).
+    final_content: Mapped[str | None] = mapped_column(Text)
+    review_comment: Mapped[str | None] = mapped_column(Text)
+    # Сообщение обращения, созданное учебной доставкой одобренного ответа.
+    delivered_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ticket_messages.id", ondelete="SET NULL"), unique=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

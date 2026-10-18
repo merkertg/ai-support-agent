@@ -1,4 +1,4 @@
-# Локальный стенд этапов 02–06. Настройки берутся из .env, образ — из Dockerfile.
+# Локальный стенд этапов 02–07. Настройки берутся из .env, образ — из Dockerfile.
 name: ai-support-agent
 
 # Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
@@ -79,6 +79,8 @@ services:
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
       KNOWLEDGE_MIN_SCORE: ${KNOWLEDGE_MIN_SCORE:-0.2}
+      # LangGraph не отправляет трассы во внешний LangSmith.
+      LANGSMITH_TRACING: "false"
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:

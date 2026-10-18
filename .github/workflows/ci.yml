@@ -176,12 +176,19 @@ jobs:
             python -m app.knowledge.ingest | tee ingest.json
           python3 -c 'import json; r = json.load(open("ingest.json")); assert r["documents"] >= 1 and r["indexed"] and not r["removed"]'
 
-      # --check-agent включает БД, API, базу знаний, mock-черновик и запуск агента.
-      # Журнал нужен следующему шагу: из него берётся ID созданного запуска.
-      - name: Check HTTP endpoints, knowledge search and agent run
+      # --check-review включает БД, API, базу знаний, mock-черновик, запуск агента
+      # и решение сотрудника. Журнал нужен следующему шагу: из него берётся ID запуска.
+      - name: Check HTTP endpoints, knowledge search, agent run and review
         run: |
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-agent | tee smoke.log
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-review | tee smoke.log
+
+      # Ещё один запуск остаётся в ожидании решения: граф LangGraph будет продолжен
+      # только после пересоздания контейнеров, из checkpoint в PostgreSQL.
+      - name: Leave a review workflow waiting
+        run: |
+          python3 scripts/smoke_test.py \
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-agent | tee pending.log
 
       # Подтверждаем, что данные находятся в постоянном томе PostgreSQL.
       # После пересоздания контейнеров только читаем: seed мог бы скрыть потерю.
@@ -213,9 +220,14 @@ jobs:
           docker compose --project-name ai-support-ci exec -T api \
             python -m app.knowledge.ingest > ingest-again.json
           python3 -c 'import json; r = json.load(open("ingest-again.json")); assert r["indexed"] == [] and r["removed"] == [] and r["unchanged"]'
+          # Решение по запуску, начатому до пересоздания: LangGraph продолжает поток.
+          pending_run="$(grep -o -m 1 '/api/agent-runs/[0-9]*' pending.log | grep -o '[0-9]*$')"
+          test -n "$pending_run"
+          python3 scripts/smoke_test.py \
+            --base-url http://127.0.0.1:8000 --timeout 30 --review-run "$pending_run"
 
           python3 scripts/smoke_test.py \
-            --base-url http://127.0.0.1:8000 --timeout 30 --check-agent
+            --base-url http://127.0.0.1:8000 --timeout 30 --check-review
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image

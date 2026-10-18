@@ -15,6 +15,18 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+# Таблицы checkpointer LangGraph создаёт миграция 0004 по DDL библиотеки, но
+# SQLAlchemy-моделей у них нет: alembic check не должен предлагать их удалить.
+LANGGRAPH_TABLES = frozenset(
+    {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"}
+)
+
+
+def include_name(name: str | None, type_: str, parent_names: dict) -> bool:
+    """Сравнивать с моделями все объекты, кроме таблиц checkpointer LangGraph."""
+    if type_ == "table":
+        return name not in LANGGRAPH_TABLES
+    return True
 
 
 def get_database_url() -> str:
@@ -39,6 +51,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -50,6 +63,7 @@ def migrate_with_connection(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()

@@ -52,6 +52,17 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
+def positive_id(value: str) -> int:
+    """Принять положительный целый id запуска."""
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("id должен быть целым числом") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("id должен быть больше 0")
+    return number
+
+
 def positive_timeout(value: str) -> float:
     """Принять только конечное положительное число секунд для дедлайна."""
     try:
@@ -130,6 +141,10 @@ def fetch(
             body = b"".join(chunks)
     except HTTPError as error:
         # HTTPError является наследником URLError: обрабатываем его первым.
+        if error.code == expected_status:
+            # Ожидаемая ошибка (например, 409 на повторное решение) — успех проверки.
+            with error:
+                return error.read(MAX_RESPONSE_BYTES)
         raise SmokeTestError(
             f"{url}: ожидался HTTP {expected_status}, получен HTTP {error.code}"
         ) from error
@@ -465,7 +480,7 @@ def valid_agent_run(run: dict, ticket_id: int) -> bool:
 
 def check_mock_agent(
     url: str, paths: dict, deadline: float, records: dict[str, dict]
-) -> None:
+) -> dict:
     """Проверить сохранённый запуск агента на учебных записях --check-llm.
 
     Вызывается только после подтверждения mock в check_mock_llm. Создаёт
@@ -518,6 +533,114 @@ def check_mock_agent(
     if unchanged != ticket:
         raise SmokeTestError("Агент изменил сохранённое обращение")
     print("OK обращение не изменилось; добавлены лицензия, запуск и предложение")
+    return run
+
+
+REVIEW_TEXT = "Smoke: ответ проверен и одобрен оператором."
+
+
+def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
+    """Одобрить предложение запуска и проверить доставку и итог графа LangGraph.
+
+    Создаёт учебного сотрудника и сообщение обращения; обращение переходит
+    в waiting_customer. Второе решение обязано получить 409.
+    """
+    for prefix, suffix, method in (
+        ("/api/users", "", "post"),
+        ("/api/agent-runs/{", "}/workflow", "get"),
+        ("/api/suggestions/{", "}/review", "post"),
+    ):
+        if not has_operation(paths, prefix, suffix, method):
+            raise SmokeTestError(
+                f"/openapi.json: отсутствует операция {method.upper()} {prefix}{suffix}"
+            )
+    suggestion = run.get("suggestion")
+    if (
+        not isinstance(suggestion, dict)
+        or type(suggestion.get("id")) is not int
+        or suggestion.get("status") != "pending"
+        or not isinstance(run.get("workflow_thread_id"), str)
+        or not run["workflow_thread_id"]
+    ):
+        raise SmokeTestError("Запуск не содержит ожидающего предложения и потока")
+    endpoint = f"/api/agent-runs/{run['id']}/workflow"
+    waiting = json_object(fetch(f"{url}{endpoint}", deadline), endpoint)
+    if (
+        waiting.get("state") != "awaiting_review"
+        or waiting.get("next") != ["human_review"]
+        or waiting.get("thread_id") != run["workflow_thread_id"]
+        or waiting.get("suggestion_id") != suggestion["id"]
+    ):
+        raise SmokeTestError(f"{endpoint}: граф не ожидает решения сотрудника")
+    print(f"OK {endpoint}: граф LangGraph остановлен на human_review")
+    reviewer = create_smoke_record(
+        url,
+        "users",
+        {"name": "Smoke reviewer", "email": f"smoke-{uuid4().hex[:12]}@example.com"},
+        deadline,
+    )
+    endpoint = f"/api/suggestions/{suggestion['id']}/review"
+    result = json_object(
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={
+                "decision": "approve",
+                "reviewer_id": reviewer["id"],
+                "final_content": REVIEW_TEXT,
+            },
+        ),
+        endpoint,
+    )
+    reviewed = result.get("suggestion")
+    message = result.get("message")
+    workflow = result.get("workflow")
+    if (
+        not isinstance(reviewed, dict)
+        or not isinstance(message, dict)
+        or not isinstance(workflow, dict)
+        or reviewed.get("status") != "approved"
+        or reviewed.get("reviewed_by") != reviewer["id"]
+        or reviewed.get("final_content") != REVIEW_TEXT
+        or reviewed.get("delivered_message_id") != message.get("id")
+        or message.get("author_type") != "operator"
+        or message.get("user_id") != reviewer["id"]
+        or message.get("content") != REVIEW_TEXT
+        or message.get("ticket_id") != run["ticket_id"]
+        or result.get("ticket_status") != "waiting_customer"
+        or workflow.get("state") != "delivered"
+        or workflow.get("next") != []
+    ):
+        raise SmokeTestError(f"{endpoint}: неверный итог одобрения и доставки")
+    print(f"OK {endpoint}: одобрено, сообщение оператора доставлено")
+    ticket_endpoint = f"/api/tickets/{run['ticket_id']}"
+    ticket = json_object(fetch(f"{url}{ticket_endpoint}", deadline), ticket_endpoint)
+    if ticket.get("status") != "waiting_customer":
+        raise SmokeTestError(f"{ticket_endpoint}: обращение не ждёт ответа клиента")
+    print(f"OK {ticket_endpoint}: статус waiting_customer")
+    try:
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={
+                "decision": "reject",
+                "reviewer_id": reviewer["id"],
+                "comment": "Повторное решение",
+            },
+            expected_status=409,
+        )
+    except SmokeTestError as error:
+        raise SmokeTestError(f"{endpoint}: повторное решение не отклонено") from error
+    print(f"OK {endpoint}: повторное решение получает 409")
+
+
+def review_existing_run(url: str, paths: dict, deadline: float, run_id: int) -> None:
+    """Продолжить граф уже сохранённого запуска, например после перезапуска стенда."""
+    endpoint = f"/api/agent-runs/{run_id}"
+    run = json_object(fetch(f"{url}{endpoint}", deadline), endpoint)
+    check_review(url, paths, deadline, run)
 
 
 def run_checks(
@@ -528,14 +651,18 @@ def run_checks(
     check_llm: bool = False,
     check_agent: bool = False,
     check_knowledge_base: bool = False,
+    check_review_flow: bool = False,
+    review_run_id: int | None = None,
 ) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
+    # Решение сотрудника проверяется на свежем запуске агента.
+    check_agent = check_agent or check_review_flow
     # Агент использует учебные записи и проверку mock из --check-llm,
     # а его поиск имеет смысл только при готовом индексе базы знаний.
     check_llm = check_llm or check_agent
     check_knowledge_base = check_knowledge_base or check_agent
     # Предметное API требует БД, поэтому --check-api включает и /ready.
-    check_api = check_api or check_llm or check_knowledge_base
+    check_api = check_api or check_llm or check_knowledge_base or bool(review_run_id)
     check_database = check_database or check_api
     deadline = time.monotonic() + timeout
     while True:
@@ -605,7 +732,11 @@ def run_checks(
     if check_llm:
         records = check_mock_llm(url, paths, deadline)
         if check_agent:
-            check_mock_agent(url, paths, deadline, records)
+            run = check_mock_agent(url, paths, deadline, records)
+            if check_review_flow:
+                check_review(url, paths, deadline, run)
+    if review_run_id is not None:
+        review_existing_run(url, paths, deadline, review_run_id)
 
 
 def main() -> int:
@@ -657,6 +788,21 @@ def main() -> int:
             "агента; включает --check-llm и --check-knowledge"
         ),
     )
+    parser.add_argument(
+        "--check-review",
+        action="store_true",
+        help=(
+            "только mock: одобрить предложение нового запуска, проверить доставку "
+            "и граф LangGraph; включает --check-agent"
+        ),
+    )
+    parser.add_argument(
+        "--review-run",
+        type=positive_id,
+        default=None,
+        metavar="RUN_ID",
+        help="одобрить ожидающее предложение существующего запуска и проверить итог",
+    )
     args = parser.parse_args()
     try:
         run_checks(
@@ -667,6 +813,8 @@ def main() -> int:
             check_llm=args.check_llm,
             check_agent=args.check_agent,
             check_knowledge_base=args.check_knowledge,
+            check_review_flow=args.check_review,
+            review_run_id=args.review_run,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

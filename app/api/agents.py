@@ -8,12 +8,15 @@ from fastapi.responses import JSONResponse
 from app.agent.provider import get_agent_provider
 from app.api.dependencies import ApiSession
 from app.api.knowledge import get_knowledge_factory
+from app.api.reviews import get_checkpointer_factory
 from app.api.routes import ResourceId
 from app.knowledge.index import IndexFactory
 from app.schemas.agents import AgentErrorRead, AgentRunRead, AnalyzeRequest
 from app.schemas.resources import ErrorRead
 from app.services import agents
 from app.services.agents import AgentRunFailure, ProviderFactory
+from app.workflow import service as workflow
+from app.workflow.service import CheckpointerFactory
 
 router = APIRouter(prefix="/api", tags=["Agent"])
 
@@ -48,6 +51,9 @@ def analyze_ticket(
     session: ApiSession,
     provider_factory: Annotated[ProviderFactory, Depends(get_agent_factory)],
     knowledge_factory: Annotated[IndexFactory, Depends(get_knowledge_factory)],
+    checkpointer_factory: Annotated[
+        CheckpointerFactory, Depends(get_checkpointer_factory)
+    ],
     payload: AnalyzeRequest | None = None,
 ) -> AgentRunRead:
     """Запустить инструменты чтения и сохранить черновик для проверки человеком.
@@ -56,12 +62,15 @@ def analyze_ticket(
     ключа лицензии. Другие поля, включая команды изменения статуса, запрещены.
     Синхронный маршрут работает в потоке и не блокирует async-цикл FastAPI.
     """
-    return agents.analyze_ticket(
+    # С этапа 07 анализ — первый узел графа LangGraph: после него граф
+    # останавливается и ждёт решения сотрудника (POST /api/suggestions/.../review).
+    return workflow.start_analysis(
         session,
         resource_id,
         payload or AnalyzeRequest(),
         provider_factory,
         knowledge_factory,
+        checkpointer_factory,
     )
 
 

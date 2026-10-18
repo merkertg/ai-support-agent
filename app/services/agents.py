@@ -27,12 +27,17 @@ ProviderFactory = Callable[[], AgentProvider]
 class AgentRunFailure(Exception):
     """Связать безопасную ошибку модели с уже сохранённым неудачным запуском."""
 
-    def __init__(self, error: LLMError, run_id: int) -> None:
-        """Скопировать только публичный статус и текст, не исходную ошибку SDK."""
-        self.status_code = error.status_code
-        self.detail = error.detail
+    def __init__(self, status_code: int, detail: str, run_id: int) -> None:
+        """Хранить только публичный статус и текст, не исходную ошибку SDK."""
+        self.status_code = status_code
+        self.detail = detail
         self.run_id = run_id
         super().__init__(self.detail)
+
+    @classmethod
+    def of(cls, error: LLMError, run_id: int) -> "AgentRunFailure":
+        """Скопировать постоянные статус и текст безопасной ошибки."""
+        return cls(error.status_code, error.detail, run_id)
 
 
 def read_run(session: Session, run_id: int) -> AgentRunRead:
@@ -60,6 +65,7 @@ def read_run(session: Session, run_id: int) -> AgentRunRead:
         usage=run.usage,
         result=run.result,
         suggestion=SuggestionRead.model_validate(suggestion) if suggestion else None,
+        workflow_thread_id=run.workflow_thread_id,
     )
     # DTO скопирован из ORM: чтение можно закончить и вернуть соединение в пул.
     session.rollback()
@@ -115,6 +121,8 @@ def analyze_ticket(
     payload: AnalyzeRequest,
     provider_factory: ProviderFactory = get_agent_provider,
     knowledge_factory: IndexFactory | None = open_configured_index,
+    *,
+    workflow_thread_id: str | None = None,
 ) -> AgentRunRead:
     """Прочитать границы доступа, освободить БД и выполнить ограниченный цикл.
 
@@ -145,6 +153,8 @@ def analyze_ticket(
             status="running",
             provider=provider.provider,
             model=provider.model,
+            # Связь с потоком LangGraph, который ждёт решения сотрудника.
+            workflow_thread_id=workflow_thread_id,
         )
         session.add(run)
         session.flush()
@@ -155,14 +165,14 @@ def analyze_ticket(
         outcome = runtime.run(context)
     except LLMError as error:
         finish_run(session, run_id, runtime.progress, error=error)
-        raise AgentRunFailure(error, run_id) from None
+        raise AgentRunFailure.of(error, run_id) from None
     except Exception:
         # Неожиданная ошибка также получает конечный статус и безопасный текст.
         # Если сама БД недоступна, запись finish_run откатится и общий handler
         # вернёт 503; обещать сохранение failed в этом случае невозможно.
         error = LLMUnavailableError()
         finish_run(session, run_id, runtime.progress, error=error)
-        raise AgentRunFailure(error, run_id) from None
+        raise AgentRunFailure.of(error, run_id) from None
     finish_run(
         session, run_id, outcome.progress, result=outcome.final, model=outcome.model
     )

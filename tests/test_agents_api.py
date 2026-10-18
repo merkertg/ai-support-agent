@@ -176,7 +176,7 @@ def test_runtime_error_returns_persisted_run_id(
     agent_dependencies: tuple[Mock, Mock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Тайм-аут можно найти отдельным GET по безопасному run_id из ошибки."""
-    analyze = Mock(side_effect=AgentRunFailure(LLMTimeoutError(), 12))
+    analyze = Mock(side_effect=AgentRunFailure.of(LLMTimeoutError(), 12))
     monkeypatch.setattr(agents, "analyze_ticket", analyze)
     with TestClient(application.app) as client:
         response = client.post("/api/tickets/7/analyze")
