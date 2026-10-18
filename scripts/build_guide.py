@@ -2503,7 +2503,11 @@ def append_audit_pages(story, verification):
             [145, W - 145],
         ),
         Spacer(1, 9),
-        callout(escape(verification["remote_ci"]["detail"]), AMBER, AMBER_L),
+        callout(
+            escape(verification["remote_ci"]["detail"]),
+            GREEN if verification["remote_ci"]["status"] == "passed" else AMBER,
+            GREEN_L if verification["remote_ci"]["status"] == "passed" else AMBER_L,
+        ),
         Spacer(1, 8),
         p("Как читать эту страницу", H2),
         p(

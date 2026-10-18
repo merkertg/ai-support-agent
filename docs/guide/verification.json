@@ -43,8 +43,17 @@
     }
   ],
   "remote_ci": {
-    "status": "not_verified",
-    "detail": "Удалённый запуск итогового коммита GitHub Actions и его публикация GHCR ещё не подтверждены. Локальные проверки выполнены успешно."
+    "status": "passed",
+    "commit": "061c2a70930ad435d898ccc38fc612d97cbe6128",
+    "confirmed_by": "user",
+    "confirmed_at": "2026-10-18",
+    "jobs": {
+      "checks": "success",
+      "security": "success",
+      "container": "success",
+      "publish": "success"
+    },
+    "detail": "18.10.2026 пользователь подтвердил: для коммита 061c2a7 все четыре задания GitHub Actions зелёные, включая Publish tested image to GHCR. Подтверждение относится к этому коммиту."
   },
   "changes": [
     "Исправлено восстановление checkpoint после сохранённого анализа или решения без повторной доставки.",
