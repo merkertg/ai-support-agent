@@ -1,4 +1,4 @@
-# Локальный стенд этапов 02–07. Настройки берутся из .env, образ — из Dockerfile.
+# Локальный стенд этапов 02–10. Настройки берутся из .env, образ — из Dockerfile.
 name: ai-support-agent
 
 # Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
@@ -92,6 +92,27 @@ services:
       qdrant:
         condition: service_healthy
     # В Dockerfile /ready проверяет соединение с БД и актуальность миграции.
+    healthcheck:
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # Этап 08: интерфейс оператора. Обращается только к API, БД и ключей не получает.
+  ui:
+    image: ${UI_IMAGE:-ai-support-agent-ui:local}
+    build:
+      context: .
+      target: ui
+    environment:
+      # Внутри Docker-сети API доступен по имени сервиса, а не по 127.0.0.1.
+      API_URL: http://api:8000
+    ports:
+      - "127.0.0.1:${UI_PORT:-8502}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    # Проверка /_stcore/health задана в Dockerfile; здесь только частота.
     healthcheck:
       interval: 3s
       timeout: 5s

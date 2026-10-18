@@ -51,7 +51,15 @@ def read_run(session: Session, run_id: int) -> AgentRunRead:
         .order_by(AgentSuggestion.id)
         .limit(1)
     )
-    response = AgentRunRead(
+    response = run_read(run, suggestion)
+    # DTO скопирован из ORM: чтение можно закончить и вернуть соединение в пул.
+    session.rollback()
+    return response
+
+
+def run_read(run: AgentRun, suggestion: AgentSuggestion | None) -> AgentRunRead:
+    """Скопировать запуск и его предложение в независимый DTO без SQL-запросов."""
+    return AgentRunRead(
         id=run.id,
         ticket_id=run.ticket_id,
         status=run.status,
@@ -67,9 +75,6 @@ def read_run(session: Session, run_id: int) -> AgentRunRead:
         suggestion=SuggestionRead.model_validate(suggestion) if suggestion else None,
         workflow_thread_id=run.workflow_thread_id,
     )
-    # DTO скопирован из ORM: чтение можно закончить и вернуть соединение в пул.
-    session.rollback()
-    return response
 
 
 def finish_run(

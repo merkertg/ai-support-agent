@@ -2,7 +2,7 @@
 
 [← README](../../README.md) · [All documentation](../../README.md#documentation)
 
-Lint, formatting, unit and integration tests, and migration checks.
+Lint, formatting, unit and integration tests, migration checks, and offline evaluations.
 
 ## Verify
 
@@ -11,7 +11,12 @@ uv run --locked python scripts/check_project.py
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked pytest -v
+uv run --locked python -m evaluations.run
 ```
+
+The default `uv sync --locked` installs the `dev` group, which includes the `ui` group, so the Streamlit AppTest checks in `tests/test_operator_ui.py` run with the rest of the suite.
+
+`python -m evaluations.run` measures retrieval quality and the agent's server-side safety contract without network, keys, or PostgreSQL. It writes `reports/evaluations.json` and exits `1` when a threshold from `evaluations/thresholds.json` is violated. Metrics, scenarios, and limits are described in the [Stage 09 guide](../STAGE_09.md).
 
 Without `TEST_DATABASE_URL`, local Pytest explicitly skips database integration tests. To run the full suite, start the separate disposable test database on its default port `5434`:
 

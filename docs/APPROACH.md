@@ -2,11 +2,11 @@
 
 ## Problem and product goal
 
-Support operators need customer information, license details, and technical documentation to investigate a ticket. The planned application will collect this information, prepare an answer supported by sources, and let an operator approve it before simulated delivery.
+Support operators need customer information, license details, and technical documentation to investigate a ticket. The application collects this information, prepares an answer supported by sources, and lets an operator approve it before simulated delivery.
 
 The project uses fictional TechFlow products and artificial support data.
 
-## Current implementation: Stages 01–07
+## Current implementation: Stages 01–10
 
 The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client produces a structured draft preview from an existing ticket without modifying stored records. Fictional Markdown support articles are indexed into Qdrant and searchable by product. A bounded agent gathers facts through five read-only tools, including knowledge search, and saves its run together with a pending reply suggestion that cites only the articles it found. A LangGraph workflow pauses until an employee approves or rejects the suggestion and survives API restarts through PostgreSQL checkpoints.
 
@@ -163,7 +163,7 @@ The integration fixtures reset their schema between scenarios. They require an e
 
 Compose provides a separate `db-test` service behind its `test` profile, on host port `5434` by default. It stores disposable test data in memory rather than the development volume. The [Stage 02 guide](STAGE_02.md) explains how to start it and run all tests.
 
-Run lint, formatting, and the full test suite using the commands in the [testing instructions](instructions/testing.md). Successful verification must also include actual startup, a successful `/ready`, and reading saved records after removing and recreating the Compose containers while retaining the database volume. The [development log](DEVELOPMENT_LOG.md) records implementation steps and verification evidence. This design document makes no claims about agent quality, retrieval accuracy, latency, or cost; those require future functionality and evaluation scenarios.
+Run lint, formatting, and the full test suite using the commands in the [testing instructions](instructions/testing.md). Successful verification must also include actual startup, a successful `/ready`, and reading saved records after removing and recreating the Compose containers while retaining the database volume. The [development log](DEVELOPMENT_LOG.md) records implementation steps and verification evidence. Offline evaluations (Stage 09) measure retrieval with mock embeddings and the server-side agent contract; this document makes no claims about real LLM answer quality, latency, or cost, which have not been measured.
 
 ## CI/CD and Docker packaging
 
@@ -177,9 +177,17 @@ On a successful push to `main`, that same tested image is exported as an artifac
 
 This implements continuous delivery of a container image. External server deployment is outside the chosen scope. Detailed operation is documented in [CI_CD.md](CI_CD.md). GitHub execution and publication must be confirmed from an actual workflow run, independently of local checks.
 
-## Planned architecture
+## Operator interface, evaluations and demo (Stages 08–10)
 
-Later stages will grow into a modular backend with this flow:
+**Operator interface.** `operator_ui/` is a Streamlit application that talks only to the HTTP API through a small client with fixed timeouts, whitelisted routes, no redirects, and no automatic POST/PATCH retries. It needs neither `DATABASE_URL` nor model keys. Stage 08 added four read/write endpoints for it: whole-database dashboard aggregates, saved run history, ticket messages, and an explicit ticket status change. Forms mutate only on explicit submission, so a Streamlit rerun never repeats an analysis or a decision; a real-model or real-embedding call requires a fresh confirmation. The `reviewer_id` in the sidebar is an author mark, not authentication. The UI ships as a separate Docker target with only Streamlit and httpx; the API image does not contain Streamlit.
+
+**Evaluations.** `evaluations/` builds an in-memory Qdrant index with the production indexing code and measures Recall@5, MRR@5, no-hit accuracy, and product-scope violations on 32 labelled questions, plus 12 agent scenarios that run the real `AgentRuntime` with the actual mock provider or scripted hostile turns (forged citations, prompt-injected `send_email`, foreign IDs, budget overruns). Thresholds were fixed before the first measurement, and CI fails on any violation. Sensitivity tests deliberately disable citation validation or the tool whitelist and require the suite to fail. The no-hit questions exposed mock-hash collisions, fixed by a mock-only lexical guard in `KnowledgeIndex.search`.
+
+**Demo.** `scripts/demo_scenario.py` uses only the HTTP API and the standard library. It refuses to write unless both providers are mock and the index is ready, then creates or reuses stable fictional records and leaves one pending suggestion for a person. `--verify-review` checks both decision branches on separate tickets. Sequential reruns read existing results instead of creating new ones.
+
+## Architecture
+
+The implemented application follows this flow:
 
 ```text
 Streamlit operator interface
@@ -193,10 +201,10 @@ FastAPI routes → business services → repositories → PostgreSQL
               document search → Qdrant
 ```
 
-The interface will communicate through the API. Server-side services enforce the data scope and expose a restricted set of agent tools. The agent prepares a suggestion for human review. Stage 07 already uses LangGraph around the tool-calling loop from Stage 05 to pause for human review and resume with a decision.
+The interface communicates only through the API. Server-side services enforce the data scope and expose a restricted set of agent tools. The agent prepares a suggestion for human review. Stage 07 already uses LangGraph around the tool-calling loop from Stage 05 to pause for human review and resume with a decision.
 
-PostgreSQL, its schema, create/read REST business operations, LLM draft previews, the bounded agent with read-only tools, Qdrant knowledge search with agent citations, and the LangGraph review workflow are implemented. Authentication, real message delivery, retrieval and answer quality evaluation, and the operator interface remain future work.
+All of these components are implemented. Authentication and roles, real message delivery, live OpenAI quality and cost measurement, publishing the UI image, and server deployment remain future work.
 
-## Next step
+## Next steps
 
-Stage 08 will add a Streamlit operator interface on top of the existing API: the ticket list, analysis, the review queue, and decisions. Agent and retrieval evaluations follow the roadmap.
+The ten learning stages are complete. Further work should start from one verifiable result at a time: a live OpenAI run on the same evaluation set once a key and budget are approved; authentication and per-operation access checks before real operators use the system; reliable delivery through a real email or helpdesk channel; and a separate deployment job with secrets, TLS, backups, and monitoring. The [demo guide](DEMO.md) lists the same steps.

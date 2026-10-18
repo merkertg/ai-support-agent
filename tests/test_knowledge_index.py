@@ -177,3 +177,54 @@ def test_search_tool_reports_unavailable_knowledge_as_tool_error() -> None:
     missing = new_index()
     result = executor(lambda: missing)._search("сервер", "techflow-server", 3)
     assert result["error"]["code"] == "knowledge_unavailable"
+
+
+def test_mock_hash_collision_cannot_return_unrelated_recipe(index) -> None:
+    """Случайная коллизия хеша не превращает рецепт в техническую инструкцию."""
+    query = "Рецепт борща со сметаной и свёклой"
+    # При размерности 256 исходный cosine действительно даёт ложный результат.
+    raw = index.client.query_points(
+        index.collection,
+        query=index.embedder.embed([query])[0],
+        limit=30,
+        score_threshold=index.min_score,
+        with_payload=True,
+    ).points
+    assert any(point.payload["document_key"] == "KB-SUPPORT-DATA" for point in raw)
+    assert index.search(query, ["techflow-server", "general"], 5) == []
+
+
+def test_mock_brand_without_content_is_not_evidence(index) -> None:
+    """Общий бренд не делает все учебные статьи релевантными пустому вопросу."""
+    assert index.search("TechFlow", None, 5) == []
+    assert index.search("TechFlow сброс пароля", ["general"], 5)[0].document_key == (
+        "KB-PASSWORD-RESET"
+    )
+
+
+def test_lexical_collision_guard_does_not_filter_semantic_provider() -> None:
+    """Реальные эмбеддинги вправе находить смысл без общей лексической основы."""
+
+    class SemanticFixtureEmbedder:
+        """Вернуть заданный семантический вектор без SDK, сети и API-ключа."""
+
+        dimensions = 64
+        signature = "openai:fixture:64"
+        provider = "openai"
+        model = "fixture"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            """Смоделировать одинаковый смысл текстов с разными словами."""
+            return [[1.0, *([0.0] * 63)] for _ in texts]
+
+    with KnowledgeIndex(
+        QdrantClient(location=":memory:"),
+        "semantic_fixture",
+        SemanticFixtureEmbedder(),
+        min_score=0.2,
+    ) as value:
+        value.ensure_collection()
+        value.replace_document(BY_KEY["KB-PASSWORD-RESET"])
+        # Этого слова в статье нет: лексический guard применился бы ошибочно.
+        hits = value.search("authentication", ["general"], 5, per_document=True)
+        assert [hit.document_key for hit in hits] == ["KB-PASSWORD-RESET"]

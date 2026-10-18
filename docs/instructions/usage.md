@@ -2,7 +2,7 @@
 
 [← README](../../README.md) · [All documentation](../../README.md#documentation)
 
-Business records, LLM draft previews, knowledge base search, and the agent. Start the stack with the [quickstart](quickstart.md) first.
+Business records, LLM draft previews, knowledge base search, the agent, human review, and the operator endpoints. Start the stack with the [quickstart](quickstart.md) first. The same operations are available without curl in the [operator interface](http://127.0.0.1:8502), described in the [Stage 08 guide](../STAGE_08.md).
 
 ## Work with the business API
 
@@ -103,3 +103,20 @@ uv run --locked python scripts/smoke_test.py \
 ```
 
 `--check-review` includes `--check-agent` and additionally approves the new suggestion, checks the delivered message, the ticket status, the `delivered` workflow, and the 409 on a repeated decision. `--review-run RUN_ID` performs the same checks for an existing waiting run. The [Stage 07 guide](../STAGE_07.md) explains the graph, checkpoints, and reliability rules.
+
+## Operator endpoints
+
+Stage 08 added read models for the operator interface; any HTTP client can use them:
+
+| Operation | Result |
+| --- | --- |
+| `GET /api/dashboard` | Aggregates over the whole database: tickets, open and high-priority tickets, analyzed tickets, completed/failed runs, suggestion decisions, average analysis time, approval rate. Averages and rates are `null` when there is no data yet. |
+| `GET /api/agent-runs?ticket_id=…` | Saved runs, including `failed` and `running`, without calling the model. |
+| `GET /api/tickets/{resource_id}/messages` | Messages of one ticket, paginated like other lists. |
+| `PATCH /api/tickets/{resource_id}` | Body `{"status": "…"}` changes only the ticket status; other fields are rejected with 422. It does not start the agent or decide suggestions. |
+
+```bash
+curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/dashboard
+```
+
+To prepare a reproducible demonstration through these APIs, run `scripts/demo_scenario.py`; see the [Stage 10 guide](../STAGE_10.md).

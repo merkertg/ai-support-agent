@@ -18,7 +18,14 @@ from qdrant_client.http.exceptions import ApiException, ResponseHandlingExceptio
 
 from app.knowledge.config import KnowledgeSettings
 from app.knowledge.documents import SourceDocument
-from app.knowledge.embeddings import Embedder, get_embedder, is_meaningful
+from app.knowledge.embeddings import (
+    STOP_WORDS,
+    Embedder,
+    MockEmbedder,
+    get_embedder,
+    is_meaningful,
+    stems,
+)
 from app.knowledge.errors import (
     KnowledgeConfigurationError,
     KnowledgeError,
@@ -32,6 +39,19 @@ from app.knowledge.errors import (
 POINT_NAMESPACE = uuid.UUID("6f3f6a52-5b43-4b5e-9a35-6c1f1c7f0a06")
 KEYWORD_FIELDS = ("document_key", "scope", "embedding_signature")
 SCROLL_PAGE = 256
+# Общее имя семейства встречается во всех статьях и не подтверждает их релевантность.
+MOCK_BRAND_STEMS = frozenset(stems("TechFlow"))
+
+
+def shares_lexical_stem(query: str, candidate: str) -> bool:
+    """Отделить настоящее совпадение слов от случайной коллизии mock-хеша.
+
+    Векторы и подпись пространства не меняются. Это только дополнительный
+    фильтр mock после Qdrant: OpenAI-эмбеддинги могут находить синонимы без
+    общих основ, поэтому для них эта проверка никогда не применяется.
+    """
+    meaningful = set(stems(query)) - STOP_WORDS - MOCK_BRAND_STEMS
+    return bool(meaningful & (set(stems(candidate)) - STOP_WORDS))
 
 
 @dataclass(frozen=True)
@@ -294,6 +314,12 @@ class KnowledgeIndex:
                 # Повреждённую точку не показываем как найденный источник.
                 continue
             if not math.isfinite(hit.score):
+                continue
+            if isinstance(self.embedder, MockEmbedder) and not shares_lexical_stem(
+                query, f"{hit.title}\n{hit.section}\n{hit.text}"
+            ):
+                # Косинус mock может быть высоким из-за коллизий 256 координат.
+                # Дополнительный фильтр требует хотя бы одно реальное общее слово.
                 continue
             if per_document:
                 if hit.document_key in seen:

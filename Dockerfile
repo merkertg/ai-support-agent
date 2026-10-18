@@ -6,6 +6,43 @@ FROM python:3.12-slim AS python-base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Интерфейс оператора собирается отдельно: ему нужны только Streamlit и httpx.
+# Цель выбирается явно (--target ui); без --target по-прежнему собирается API.
+FROM python-base AS ui-builder
+COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /bin/uv
+
+WORKDIR /app
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_LINK_MODE=copy
+
+# --only-group ui не ставит FastAPI, драйвер PostgreSQL, LangGraph и SDK OpenAI.
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --only-group ui
+
+FROM python-base AS ui
+WORKDIR /app
+ENV PATH="/app/.venv/bin:$PATH" \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_FILE_WATCHER_TYPE=none \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
+    STREAMLIT_CLIENT_TOOLBAR_MODE=minimal
+
+RUN groupadd --gid 10001 app && \
+    useradd --uid 10001 --gid app --create-home app
+COPY --from=ui-builder --chown=app:app /app/.venv /app/.venv
+# Только код интерфейса: ни app/, ни миграций, ни статей в этом образе нет.
+COPY --chown=app:app operator_ui ./operator_ui
+USER app
+
+EXPOSE 8501
+
+# /_stcore/health отвечает ok, когда сервер Streamlit принимает соединения.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3); assert response.status == 200 and response.read() == b'ok'"]
+
+CMD ["streamlit", "run", "operator_ui/main.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+
 # В builder создаём окружение только с зависимостями работающего приложения.
 FROM python-base AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /bin/uv

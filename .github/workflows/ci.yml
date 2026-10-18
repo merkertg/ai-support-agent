@@ -142,6 +142,12 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: uv run --locked pytest -v --junitxml=reports/pytest.xml
 
+      # Этап 09: поиск и контракт агента без сети, ключей и PostgreSQL.
+      # Порог из evaluations/thresholds.json нарушен → код 1 и красный job.
+      - name: Run offline evaluations
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python -m evaluations.run --output reports/evaluations.json
+
       # XML-отчёт доступен в Actions и при падении теста.
       - name: Upload test report
         if: ${{ !cancelled() && hashFiles('reports/pytest.xml') != '' }}
@@ -152,7 +158,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Независимая проверка известных уязвимостей runtime-зависимостей.
+      # JSON сохраняет каждый вопрос и промах, включая провал порога.
+      - name: Upload evaluation report
+        if: ${{ !cancelled() && hashFiles('reports/evaluations.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evaluation-report
+          path: reports/evaluations.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Независимая проверка известных уязвимостей зависимостей обоих образов.
   # Проверяем точные версии из lock; зависимые задания блокируются при ошибке сети.
   security:
     name: Audit runtime dependencies
@@ -171,10 +187,11 @@ jobs:
           python-version: "3.12"
 
       # Экспорт сохраняет hashes: аудит не выбирает новые версии пакетов.
+      # Группа ui добавляет Streamlit и его зависимости из образа интерфейса.
       - name: Export locked runtime requirements
         run: |
           mkdir -p reports
-          uv export --locked --no-dev --no-emit-project --format requirements.txt \
+          uv export --locked --no-dev --group ui --no-emit-project --format requirements.txt \
             --output-file reports/runtime-requirements.txt > /dev/null
 
       # Инструмент установлен отдельно; проверяемые зависимости не устанавливаются.
@@ -207,6 +224,8 @@ jobs:
     # Этот проект и его том изолированы от Python checks и локальной разработки.
     env:
       APP_IMAGE: ai-support-agent:ci
+      UI_IMAGE: ai-support-agent-ui:ci
+      UI_PORT: "8502"
       LLM_PROVIDER: mock
       OPENAI_API_KEY: ""
       OPENAI_MODEL: ""
@@ -230,6 +249,11 @@ jobs:
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag ai-support-agent:ci .
+          # Отдельная цель Dockerfile: только Streamlit, httpx и operator_ui.
+          docker build --target ui \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag ai-support-agent-ui:ci .
 
       # HTTP smoke не обнаружит случайный возврат USER root или dev-пакетов.
       # Отдельно проверяем контракт финального runtime-образа до запуска Compose.
@@ -243,6 +267,19 @@ jobs:
           assert all(importlib.util.find_spec(name) is None for name in ("pytest", "ruff"))
           assert shutil.which("uv") is None
           print("OK runtime: UID/GID 10001; pytest, Ruff and uv excluded")
+          '
+          # Образ UI не содержит серверного кода, драйвера БД и SDK модели.
+          docker run --rm --entrypoint python ai-support-agent-ui:ci -c '
+          import importlib.util
+          import os
+          import shutil
+          assert os.getuid() == 10001 and os.getgid() == 10001
+          absent = ("app", "fastapi", "sqlalchemy", "psycopg", "openai", "langgraph",
+                    "qdrant_client", "pytest", "ruff")
+          assert all(importlib.util.find_spec(name) is None for name in absent)
+          assert importlib.util.find_spec("streamlit") is not None
+          assert shutil.which("uv") is None
+          print("OK ui: UID/GID 10001; only Streamlit client, no server code")
           '
 
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
@@ -311,6 +348,38 @@ jobs:
 
           python3 scripts/smoke_test.py \
             --base-url http://127.0.0.1:8000 --timeout 30 --check-review
+
+      # Этапы 08 и 10: UI ждёт healthy API; страница отрисовывается из контейнера
+      # настоящим AppTest, демонстрационный сценарий повторяется без изменений.
+      - name: Start operator UI and run demo scenario
+        run: |
+          docker compose --project-name ai-support-ci up \
+            --detach --no-build --wait --wait-timeout 90 ui
+          curl --fail --silent --show-error http://127.0.0.1:8502/_stcore/health && echo
+          python3 scripts/demo_scenario.py \
+            --url http://127.0.0.1:8000 --timeout 60 --verify-review > demo.json
+          python3 -c '
+          import json
+          r = json.load(open("demo.json"))
+          assert (r["suggestion_status"], r["workflow_state"]) == ("pending", "awaiting_review")
+          approve, reject = r["review_checks"]["approve"], r["review_checks"]["reject"]
+          assert (approve["status"], approve["messages"], approve["workflow_state"]) == ("approved", 1, "delivered")
+          assert (reject["status"], reject["messages"], reject["workflow_state"]) == ("rejected", 0, "rejected")
+          print("OK demo:", json.dumps(r, sort_keys=True))
+          '
+          # Повтор только читает: новых тикетов, анализов и решений нет.
+          python3 scripts/demo_scenario.py \
+            --url http://127.0.0.1:8000 --timeout 60 --verify-review > demo-again.json
+          cmp demo.json demo-again.json
+          docker compose --project-name ai-support-ci exec -T ui python -c '
+          from streamlit.testing.v1 import AppTest
+          screen = AppTest.from_file("operator_ui/main.py", default_timeout=30).run()
+          assert not screen.exception, screen.exception
+          assert not screen.error, [item.value for item in screen.error]
+          metrics = {item.label: item.value for item in screen.metric}
+          assert int(metrics["Всего обращений"]) >= 4, metrics
+          print("OK ui page:", metrics)
+          '
 
       # Передаём publish именно уже проверенный образ. Повторной сборки нет.
       - name: Export tested image

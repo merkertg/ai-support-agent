@@ -107,7 +107,14 @@ def inspect_project(root: Path) -> tuple[list[str], Counter]:
     """Собрать ошибки исходников и инструкций без запуска приложения или сети."""
     errors = []
     counts = Counter()
-    for directory in ("app", "scripts", "migrations", "tests"):
+    for directory in (
+        "app",
+        "operator_ui",
+        "evaluations",
+        "scripts",
+        "migrations",
+        "tests",
+    ):
         for path in sorted((root / directory).rglob("*.py")):
             if "__pycache__" not in path.parts:
                 errors.extend(check_python(path))

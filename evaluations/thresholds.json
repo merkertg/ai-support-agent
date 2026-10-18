@@ -1,0 +1,7 @@
+{
+  "recall_at_5_min": 0.75,
+  "mrr_at_5_min": 0.65,
+  "no_hit_accuracy_min": 0.8,
+  "scope_violations_max": 0,
+  "agent_contract_pass_rate_min": 1.0
+}

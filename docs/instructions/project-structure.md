@@ -14,6 +14,7 @@ app/
     agents.py            # Agent analysis and saved-run routes
     knowledge.py         # Knowledge search and index status routes
     reviews.py           # Suggestion queue, review decision and workflow state
+    operator.py          # Dashboard, run history, ticket messages and status for the UI
     dependencies.py      # Request sessions and safe database errors
   schemas/               # Validated resources, drafts and agent runs
   llm/                   # Independent settings, mock/OpenAI clients and safe errors
@@ -32,6 +33,16 @@ migrations/
   env.py                 # Alembic execution and database URL handling
   versions/              # Stage 02 schema, 05 agent runs, 06 index registry, 07 review
 knowledge/               # Fictional Markdown support articles for the knowledge base
+operator_ui/
+  main.py                # Streamlit entry point: streamlit run operator_ui/main.py
+  app.py                 # Pages: overview, tickets, review queue, knowledge, catalogs
+  client.py              # HTTP client with timeouts, whitelisted routes and safe errors
+evaluations/
+  run.py                 # Offline evaluation CLI: JSON report and threshold gates
+  retrieval.py           # Labelled questions, Recall@k, MRR@k, no-hit and scope checks
+  agent_contract.py      # Agent safety scenarios on the real runtime without SQL
+  *_cases.jsonl          # 32 retrieval questions and 12 agent scenarios
+  thresholds.json        # Gates fixed before the first measurement
 tests/
   integration/           # Real PostgreSQL, migrations and complete HTTP workflows
   test_health.py         # Standalone API behavior
@@ -45,10 +56,15 @@ tests/
   test_knowledge_*.py    # Articles, embeddings, in-memory Qdrant index and search API
   test_workflow.py       # LangGraph graph on an in-memory checkpointer
   test_review_api.py     # Review and staff HTTP validation
+  test_operator_*.py     # Operator API, UI HTTP client and Streamlit AppTest
+  test_evaluations.py    # Metrics, labels and evaluation CLI exit codes
+  test_security_scenarios.py  # Agent scenarios and deliberate-regression checks
+  test_demo_scenario.py  # Demo script against a fake HTTP API
   conftest.py            # In-memory checkpointer for every test by default
 scripts/
   smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
   check_project.py       # Docstrings, Markdown links, Bash and JSON examples
+  demo_scenario.py       # Idempotent mock demo through the HTTP API
   build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
 docs/
   instructions/          # Quickstart, API usage, testing, CI and this file
@@ -62,11 +78,16 @@ docs/
   STAGE_05.md            # Agent with tools learning guide in Russian
   STAGE_06.md            # Knowledge base and RAG learning guide in Russian
   STAGE_07.md            # LangGraph workflow and human review guide in Russian
+  STAGE_08.md            # Streamlit operator interface guide in Russian
+  STAGE_09.md            # Evaluations and security checks guide in Russian
+  STAGE_10.md            # Packaging and reproducible demo guide in Russian
+  DEMO.md                # 5–7 minute demonstration walkthrough
+  VERIFICATION.md        # Checks actually run and their limits
   DEVELOPMENT_LOG.md     # Step-by-step implementation log
-compose.yaml             # PostgreSQL, Qdrant, migration, API and isolated test services
+compose.yaml             # PostgreSQL, Qdrant, migration, API, UI and isolated test services
 alembic.ini              # Migration configuration without a stored database URL
 .env.example             # Local development settings
-Dockerfile               # Runtime image with application and migrations
+Dockerfile               # API runtime image (default) and separate UI target
 .dockerignore            # Excludes local environments, secrets and caches
 pyproject.toml           # Metadata, dependencies and tool settings
 uv.lock                  # Resolved dependency versions
