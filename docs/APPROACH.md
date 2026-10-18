@@ -6,9 +6,9 @@ Support operators need customer information, license details, and technical docu
 
 The project uses fictional TechFlow products and artificial support data.
 
-## Current implementation: Stages 01–03
+## Current implementation: Stages 01–04
 
-The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets.
+The application now has a runnable HTTP foundation and a persistent relational schema. Its database operations include readiness, explicit demonstration commands, and create/read REST operations for customers, products, licenses, and tickets. An LLM client now produces a structured draft preview from an existing ticket without modifying stored records.
 
 ```text
 HTTP client → Uvicorn → FastAPI
@@ -79,6 +79,20 @@ Ticket creation always uses `open`; later status transitions are outside this st
 
 The [Stage 03 guide](STAGE_03.md) explains each schema, service, handler, HTTP request, and error. Every new function has a Russian docstring; inline comments explain transaction and validation decisions. This remains a local learning application without authentication, editing, deletion, or AI execution.
 
+## LLM draft preview
+
+Stage 04 adds `GET /api/llm/status` and `POST /api/tickets/{resource_id}/draft`. The status endpoint reads configuration without SQL or a provider request. `configured` reflects settings presence, not key validity, model access, quota, or provider availability.
+
+The draft service checks the ticket and product, copies only ticket ID, subject, description, priority, product name, and product code into a standalone context object, then ends the read transaction before contacting a provider. The connection returns to the PostgreSQL pool during the potentially slow call. It does not load the customer or licenses. Arbitrary text inside the ticket may still contain sensitive data; no automatic redaction is claimed.
+
+A separate LLM settings class prevents invalid model configuration from breaking database settings or `/health`. Mock mode is the default and explicitly labels its deterministic demonstration reply. OpenAI mode requires both a secret key and a model chosen in `.env`. The SDK client is created for one request and always closed. It uses Responses with a strict Pydantic output schema, a configured network timeout and output token ceiling, no automatic retries, `store=False`, and disabled context truncation. No temperature parameter is assumed to work across all models.
+
+System instructions are separate from JSON ticket data. They require a Russian draft for human review, forbid treating ticket text as instructions, and prohibit invented claims about checked licenses, logs, or documentation. These instructions are not evidence that a real model is immune to prompt injection or produces correct technical advice.
+
+The response contains summary, category, draft reply, provider, actual response model, optional token usage, and a server-owned `requires_human_review: true`. A serialized context above 16000 characters is rejected rather than truncated; this character bound is distinct from model token limits. Refusal, incomplete/invalid output, timeout, configuration, and provider failures map to safe HTTP errors. No draft, agent run, message, status change, or automatic reply is saved or sent in this stage.
+
+The actual OpenAI SDK parser is exercised with a substituted HTTP transport. CI never requires a key or sends paid requests. Live OpenAI validation remains pending until credentials and an accessible model are configured. The [Stage 04 guide](STAGE_04.md) documents each file, mock verification, explicit live setup, and these verification limits.
+
 ## Schema lifecycle and local startup
 
 The first migration explicitly creates the nine tables, constraints, and indexes. It is a frozen description of that schema. Editing a model does not rewrite an already released migration; later schema changes require another revision. Runtime startup never calls `Base.metadata.create_all()`.
@@ -110,7 +124,7 @@ Run lint, formatting, and the full test suite using the commands in the [README]
 
 `.github/workflows/ci.yml` runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. The Python job installs locked dependencies, starts its PostgreSQL 17 service, applies migrations, checks schema drift with `alembic check`, runs Ruff lint and formatting checks, and executes all Pytest tests against the explicit test database. The independent lint, formatting, and test steps still report their outcomes if another check fails.
 
-After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-database --check-api` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, compares it with the original, and checks HTTP readiness again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
+After that job succeeds, the container job builds one runtime image and starts the Compose database, migration, and API services with `--no-build`. `scripts/smoke_test.py --check-database --check-api --check-llm` validates `/health`, `/ready`, `/docs`, and `/openapi.json`, including the documented readiness operation. The additional `--check-api` flag validates all twelve business operations in OpenAPI and reads the four resource lists with `limit=1`; it also enables database readiness checks and performs no writes. With `--check-llm`, a status guard requires configured mock before any POST. The smoke explicitly creates three fictional fixture records, requests a preview, and verifies the ticket remains unchanged. CI fixes mock mode and supplies no OpenAI credentials. An unexpected HTTP 503 fails immediately. The job then seeds demonstration records, runs `docker compose down` without `--volumes`, starts the stack again, reads the saved snapshot, compares it with the original, and checks HTTP readiness again. This removes and recreates containers while preserving the named database volume. Failure logs include all Compose services; cleanup removes the isolated CI stack and its volume.
 
 The runtime image installs runtime dependencies only, runs as UID 10001, and includes Alembic configuration and migrations. Its health check uses `/ready`, so a running HTTP process alone does not make the container healthy.
 
@@ -136,8 +150,8 @@ FastAPI routes → business services → repositories → PostgreSQL
 
 The interface will communicate through the API. Server-side services will enforce access rules and expose a restricted set of agent tools. The agent will prepare a suggestion for human review. LangGraph will be introduced after a basic tool-calling loop is understood and implemented.
 
-PostgreSQL, its schema, and create/read REST business operations are implemented. Qdrant, LLM integration, agent tools, authentication, human review, and the operator interface remain future work.
+PostgreSQL, its schema, create/read REST business operations, and LLM draft previews are implemented. Qdrant, agent tools, authentication, saved human review, and the operator interface remain future work.
 
 ## Next step
 
-Stage 04 will add the first LLM integration with configurable credentials, timeouts, safe errors, and deterministic test substitutes. The current create-customer → create-product → issue-license → open-ticket scenario provides real records for later tools. Tool calling, RAG, human review, and the operator interface follow the existing roadmap order.
+Stage 05 will add restricted tools and a bounded tool-calling loop. The model can then request customer/license checks through validated Python functions. The current draft preview provides the provider boundary; saved investigation runs, retrieval, human review, and the operator interface follow the roadmap.

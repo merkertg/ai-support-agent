@@ -2,7 +2,7 @@
 [project]
 name = "ai-support-agent"
 version = "0.1.0"
-description = "AI-powered technical support system: business REST API, PostgreSQL and CI/CD"
+description = "AI-powered technical support system: LLM draft previews, PostgreSQL and CI/CD"
 readme = "README.md"
 # Ограничение проверяется при выборе Python для окружения проекта.
 requires-python = ">=3.12"
@@ -10,6 +10,7 @@ dependencies = [
     "alembic>=1.16,<2",
     "email-validator>=2,<3",  # Проверка адреса клиента через Pydantic EmailStr.
     "fastapi",             # Маршруты API, JSON-ответы и документация /docs.
+    "openai>=3.35.0",  # Официальный SDK: Responses API и Structured Outputs.
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2,<3",
     "sqlalchemy>=2.0,<3",

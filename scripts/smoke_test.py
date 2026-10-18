@@ -8,12 +8,18 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
 
 # Ограничиваем объём ответа, чтобы ошибка сервиса не заполнила память CI.
 MAX_RESPONSE_BYTES = 1024 * 1024
 EXPECTED_HEALTH = {"status": "ok", "service": "ai-support-agent"}
 EXPECTED_READINESS = {"status": "ok", "database": "ok"}
 API_RESOURCES = ("customers", "products", "licenses", "tickets")
+EXPECTED_MOCK_LLM_STATUS = {
+    "provider": "mock",
+    "model": "mock-draft-v1",
+    "configured": True,
+}
 
 
 class SmokeTestError(Exception):
@@ -66,20 +72,32 @@ def base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def fetch(url: str, deadline: float) -> bytes:
-    """Получить HTTP 200 до дедлайна; сетевые и HTTP ошибки различаются."""
+def fetch(
+    url: str,
+    deadline: float,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    expected_status: int = 200,
+) -> bytes:
+    """Выполнить HTTP-запрос до дедлайна без скрытых повторов POST."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise SmokeTestError(f"Истёк общий тайм-аут перед запросом {url}")
     try:
         # Каждая сетевая попытка ограничена оставшимся временем и двумя секундами.
-        request = Request(url, headers={"User-Agent": "ai-support-agent-smoke-test"})
+        headers = {"User-Agent": "ai-support-agent-smoke-test"}
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = Request(url, data=data, method=method, headers=headers)
         with build_opener(NoRedirects()).open(
             request, timeout=min(2.0, remaining)
         ) as response:
-            if response.status != 200:
+            if response.status != expected_status:
                 raise SmokeTestError(
-                    f"{url}: ожидался HTTP 200, получен {response.status}"
+                    f"{url}: ожидался HTTP {expected_status}, получен {response.status}"
                 )
             # read1 возвращает очередную порцию: медленный поток байтов не
             # может бесконечно продлевать чтение одним вызовом read().
@@ -99,7 +117,7 @@ def fetch(url: str, deadline: float) -> bytes:
     except HTTPError as error:
         # HTTPError является наследником URLError: обрабатываем его первым.
         raise SmokeTestError(
-            f"{url}: ожидался HTTP 200, получен HTTP {error.code}"
+            f"{url}: ожидался HTTP {expected_status}, получен HTTP {error.code}"
         ) from error
     except (URLError, OSError) as error:
         raise ServiceUnavailable(f"{url}: сетевая ошибка: {error}") from error
@@ -170,11 +188,132 @@ def check_business_api(url: str, paths: dict, deadline: float) -> None:
         print(f"OK {endpoint}: HTTP 200, список и операции GET/POST описаны")
 
 
+def create_smoke_record(
+    url: str, resource: str, payload: dict, deadline: float
+) -> dict:
+    """Явно создать учебную запись только в дополнительном режиме --check-llm.
+
+    Случайный суффикс задаёт вызывающая функция: повтор запуска не заменяет
+    существующие данные. При сетевой ошибке POST никогда не повторяется.
+    """
+    endpoint = f"/api/{resource}"
+    record = json_object(
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload=payload,
+            expected_status=201,
+        ),
+        endpoint,
+    )
+    if type(record.get("id")) is not int or record["id"] <= 0:
+        raise SmokeTestError(f"{endpoint}: создание не вернуло положительный id")
+    return record
+
+
+def check_mock_llm(url: str, paths: dict, deadline: float) -> None:
+    """Проверить mock-черновик; сначала запретить платный режим, затем писать.
+
+    Флаг создаёт три вымышленные записи (клиент, продукт, обращение). Сам
+    маршрут черновика не должен их менять; это проверяем отдельным GET.
+    В CI записи и том принадлежат одноразовому Compose-проекту.
+    """
+    status_path = paths.get("/api/llm/status")
+    if not isinstance(status_path, dict) or not isinstance(
+        status_path.get("get"), dict
+    ):
+        raise SmokeTestError("/openapi.json: отсутствует операция GET /api/llm/status")
+    if not any(
+        path.startswith("/api/tickets/{")
+        and path.endswith("}/draft")
+        and isinstance(operations, dict)
+        and isinstance(operations.get("post"), dict)
+        for path, operations in paths.items()
+    ):
+        raise SmokeTestError(
+            "/openapi.json: отсутствует операция POST /api/tickets/{id}/draft"
+        )
+    llm_status = json_object(
+        fetch(f"{url}/api/llm/status", deadline), "/api/llm/status"
+    )
+    if llm_status != EXPECTED_MOCK_LLM_STATUS:
+        # Проверка выполняется ДО любого POST: реальный OpenAI не вызывается.
+        raise SmokeTestError(
+            "--check-llm разрешён только для настроенного mock; POST не выполнялись"
+        )
+    print("OK /api/llm/status: mock настроен; платный провайдер исключён")
+    suffix = uuid4().hex[:12]
+    customer = create_smoke_record(
+        url,
+        "customers",
+        {
+            "name": "Smoke customer",
+            "email": f"smoke-{suffix}@example.com",
+        },
+        deadline,
+    )
+    product = create_smoke_record(
+        url,
+        "products",
+        {
+            "name": "Smoke product",
+            "code": f"smoke-{suffix}",
+        },
+        deadline,
+    )
+    ticket = create_smoke_record(
+        url,
+        "tickets",
+        {
+            "customer_id": customer["id"],
+            "product_id": product["id"],
+            "subject": "Учебная проверка черновика",
+            "description": "Нужны подробности ошибки",
+        },
+        deadline,
+    )
+    endpoint = f"/api/tickets/{ticket['id']}/draft"
+    draft = json_object(fetch(f"{url}{endpoint}", deadline, method="POST"), endpoint)
+    content = draft.get("content")
+    if (
+        type(draft.get("ticket_id")) is not int
+        or draft["ticket_id"] != ticket["id"]
+        or draft.get("provider") != "mock"
+        or draft.get("model") != "mock-draft-v1"
+        or draft.get("requires_human_review") is not True
+        or draft.get("usage") is not None
+        or not isinstance(content, dict)
+        or set(content) != {"summary", "category", "draft_reply"}
+        or not isinstance(content.get("summary"), str)
+        or not content["summary"].strip()
+        or content.get("category")
+        not in {"technical_issue", "license_question", "how_to", "other"}
+        or not isinstance(content.get("draft_reply"), str)
+        or "Реальная модель не вызывалась." not in content["draft_reply"]
+    ):
+        raise SmokeTestError(
+            f"{endpoint}: неверный контракт демонстрационного черновика"
+        )
+    unchanged = json_object(
+        fetch(f"{url}/api/tickets/{ticket['id']}", deadline), "/api/tickets/{id}"
+    )
+    if unchanged != ticket:
+        raise SmokeTestError("Черновик изменил сохранённое обращение")
+    print(f"OK {endpoint}: демонстрационный черновик, требуется проверка человеком")
+    print("OK обращение не изменилось; созданы только три явные учебные записи")
+
+
 def run_checks(
-    url: str, timeout: float, check_database: bool = False, check_api: bool = False
+    url: str,
+    timeout: float,
+    check_database: bool = False,
+    check_api: bool = False,
+    check_llm: bool = False,
 ) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
     # Предметное API требует БД, поэтому --check-api включает и /ready.
+    check_api = check_api or check_llm
     check_database = check_database or check_api
     deadline = time.monotonic() + timeout
     while True:
@@ -236,6 +375,8 @@ def run_checks(
 
     if check_api:
         check_business_api(url, paths, deadline)
+    if check_llm:
+        check_mock_llm(url, paths, deadline)
 
 
 def main() -> int:
@@ -263,6 +404,14 @@ def main() -> int:
         action="store_true",
         help="проверить готовность БД и API клиентов, продуктов, лицензий, обращений",
     )
+    parser.add_argument(
+        "--check-llm",
+        action="store_true",
+        help=(
+            "только mock: проверить черновик и создать 3 учебные записи; "
+            "включает --check-api"
+        ),
+    )
     args = parser.parse_args()
     try:
         run_checks(
@@ -270,6 +419,7 @@ def main() -> int:
             args.timeout,
             check_database=args.check_database,
             check_api=args.check_api,
+            check_llm=args.check_llm,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

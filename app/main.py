@@ -14,9 +14,12 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.drafts import llm_error_handler
+from app.api.drafts import router as drafts_router
 from app.api.errors import database_error_handler, resource_error_handler
 from app.api.routes import router as api_router
 from app.db.session import DatabaseNotConfigured, dispose_engine, get_session
+from app.llm.errors import LLMError
 from app.services.errors import ResourceError
 
 # Путь не зависит от каталога, из которого запущен Uvicorn.
@@ -117,5 +120,7 @@ def ready(
 
 # REST-слой подключаем отдельно: проверки /health и /ready сохраняют свой контракт.
 app.include_router(api_router)
+app.include_router(drafts_router)
+app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(ResourceError, resource_error_handler)
 app.add_exception_handler(SQLAlchemyError, database_error_handler)

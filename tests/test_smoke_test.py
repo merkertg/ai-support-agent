@@ -17,15 +17,19 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
 
 
 def valid_responses(
-    check_database: bool = False, check_api: bool = False
+    check_database: bool = False, check_api: bool = False, check_llm: bool = False
 ) -> dict[str, tuple[int, bytes]]:
     """Собрать контракт этапа 01 либо расширенный контракт готовности БД."""
+    check_api = check_api or check_llm
     check_database = check_database or check_api
     paths = {"/health": {"get": {}}}
     if check_api:
         for resource in ("customers", "products", "licenses", "tickets"):
             paths[f"/api/{resource}"] = {"get": {}, "post": {}}
             paths[f"/api/{resource}/{{id}}"] = {"get": {}}
+    if check_llm:
+        paths["/api/llm/status"] = {"get": {}}
+        paths["/api/tickets/{resource_id}/draft"] = {"post": {}}
     if check_database:
         paths["/ready"] = {"get": {}}
     responses = {
@@ -49,6 +53,39 @@ def valid_responses(
     if check_api:
         for resource in ("customers", "products", "licenses", "tickets"):
             responses[f"/api/{resource}?limit=1"] = (200, b"[]")
+    if check_llm:
+        responses.update(
+            {
+                "/api/llm/status": (
+                    200,
+                    b'{"provider":"mock","model":"mock-draft-v1","configured":true}',
+                ),
+                "/api/customers": (201, b'{"id":11}'),
+                "/api/products": (201, b'{"id":12}'),
+                "/api/tickets": (201, b'{"id":13,"status":"open"}'),
+                "/api/tickets/13": (200, b'{"id":13,"status":"open"}'),
+                "/api/tickets/13/draft": (
+                    200,
+                    json.dumps(
+                        {
+                            "ticket_id": 13,
+                            "provider": "mock",
+                            "model": "mock-draft-v1",
+                            "requires_human_review": True,
+                            "usage": None,
+                            "content": {
+                                "summary": "Учебный разбор",
+                                "category": "other",
+                                "draft_reply": (
+                                    "Демонстрационный черновик. "
+                                    "Реальная модель не вызывалась."
+                                ),
+                            },
+                        }
+                    ).encode(),
+                ),
+            }
+        )
     return responses
 
 
@@ -69,6 +106,11 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self) -> None:
+            """Принять тело POST и выдать отдельный ответ сценария без реальной БД."""
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.do_GET()
+
         def log_message(self, format: str, *args) -> None:
             """Не засорять вывод Pytest служебными логами фиктивного сервера."""
 
@@ -85,7 +127,11 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
 
 
 def run_smoke(
-    url: str, timeout: str = "2", check_database: bool = False, check_api: bool = False
+    url: str,
+    timeout: str = "2",
+    check_database: bool = False,
+    check_api: bool = False,
+    check_llm: bool = False,
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
@@ -93,6 +139,8 @@ def run_smoke(
         command.append("--check-database")
     if check_api:
         command.append("--check-api")
+    if check_llm:
+        command.append("--check-llm")
     return subprocess.run(
         command,
         capture_output=True,
@@ -281,3 +329,77 @@ def test_cli_rejects_business_http_error_without_retry() -> None:
     assert result.returncode == 1
     assert "HTTP 503" in result.stderr
     assert requests["/api/tickets?limit=1"] == 1
+
+
+def test_cli_checks_mock_draft_and_unchanged_ticket() -> None:
+    """Явный флаг проверяет mock и полную цепочку HTTP без платного провайдера."""
+    responses = valid_responses(check_llm=True)
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_llm=True)
+    assert result.returncode == 0, result.stderr
+    assert requests == Counter({endpoint: 1 for endpoint in responses})
+    assert sum(requests.values()) == 14
+    assert "обращение не изменилось" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "provider,configured", [("openai", True), ("mock", False), ("unknown", True)]
+)
+def test_cli_refuses_llm_mode_before_any_post(provider: str, configured: bool) -> None:
+    """Реальный/неизвестный провайдер не вызывает ни платный запрос, ни записи."""
+    responses = valid_responses(check_llm=True)
+    responses["/api/llm/status"] = (
+        200,
+        json.dumps(
+            {
+                "provider": provider,
+                "model": "mock-draft-v1",
+                "configured": configured,
+            }
+        ).encode(),
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_llm=True)
+    assert result.returncode == 1
+    assert "POST не выполнялись" in result.stderr
+    assert requests["/api/customers"] == 0
+    assert requests["/api/tickets/13/draft"] == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"ticket_id": 99},
+        {"provider": "openai"},
+        {"model": "unknown"},
+        {"requires_human_review": False},
+        {"content": None},
+        {
+            "content": {
+                "summary": "Учебный",
+                "category": "other",
+                "draft_reply": "Ответ без пометки",
+            }
+        },
+    ],
+)
+def test_cli_rejects_wrong_mock_draft(changes: dict) -> None:
+    """Отклонить сломанный контракт черновика или исчезнувшую демо-пометку."""
+    responses = valid_responses(check_llm=True)
+    draft = json.loads(responses["/api/tickets/13/draft"][1])
+    responses["/api/tickets/13/draft"] = (200, json.dumps(draft | changes).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_llm=True)
+    assert result.returncode == 1
+    assert "неверный контракт" in result.stderr
+    assert requests["/api/tickets/13/draft"] == 1
+
+
+def test_cli_rejects_ticket_mutation_by_draft() -> None:
+    """Изменение статуса обращения при генерации предпросмотра блокирует выпуск."""
+    responses = valid_responses(check_llm=True)
+    responses["/api/tickets/13"] = (200, b'{"id":13,"status":"closed"}')
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_llm=True)
+    assert result.returncode == 1
+    assert "изменил сохранённое обращение" in result.stderr

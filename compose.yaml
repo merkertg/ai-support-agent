@@ -1,4 +1,4 @@
-# Локальный стенд этапа 02. Настройки берутся из .env, образ — из Dockerfile.
+# Локальный стенд этапов 02–04. Настройки берутся из .env, образ — из Dockerfile.
 name: ai-support-agent
 
 # Миграции и API запускаются из одного образа с одинаковым DATABASE_URL.
@@ -6,7 +6,7 @@ x-application: &application
   image: ${APP_IMAGE:-ai-support-agent:local}
   build:
     context: .
-  environment:
+  environment: &database-environment
     DATABASE_URL: ${DATABASE_URL_DOCKER:?Скопируй .env.example в .env и укажи DATABASE_URL_DOCKER}
 
 services:
@@ -42,6 +42,14 @@ services:
 
   api:
     <<: *application
+    # Миграции получают только DATABASE_URL; ключ модели нужен лишь API.
+    environment:
+      <<: *database-environment
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-1200}
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:

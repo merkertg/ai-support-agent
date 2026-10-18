@@ -1,14 +1,15 @@
 # AI Support Agent
 
-**Начни с [инструкции этапа 03 на русском](docs/STAGE_03.md):**
-создание клиентов, продуктов, лицензий и обращений через API.
+**Начни с [инструкции этапа 04 на русском](docs/STAGE_04.md):**
+черновик ответа по обращению, mock-режим, настройка OpenAI и проверка ошибок.
+[Этап 03](docs/STAGE_03.md) объясняет создание и чтение записей через API.
 [Этап 02](docs/STAGE_02.md) объясняет PostgreSQL, модели, миграции и запуск.
 [Журнал разработки](docs/DEVELOPMENT_LOG.md) объясняет каждый выполненный шаг;
 [инструкция этапа 01](docs/STAGE_01.md) разбирает основу FastAPI.
 
 A Python learning project for a technical support assistant. The future product will help an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery.
 
-The current implementation covers **Stages 01–03**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, Alembic migrations, twelve business API operations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. The API creates, lists, and reads customers, products, licenses, and tickets. LLM integration is the next stage.
+The current implementation covers **Stages 01–04**: FastAPI, PostgreSQL 17, nine SQLAlchemy models, Alembic migrations, twelve business API operations, database readiness, Docker Compose, and automated checks. The GitHub Actions workflow checks the application and database before delivering the tested Docker image to GHCR on successful pushes to `main`. The API creates, lists, and reads customers, products, licenses, and tickets. Draft previews support a local mock and an explicitly configured OpenAI provider. Tool calling is the next stage.
 
 ## Requirements
 
@@ -77,6 +78,33 @@ Creation returns HTTP 201; reads return 200. Invalid input returns 422, an unkno
 
 New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. This stage adds create/read operations; editing, deletion, authentication, and AI behavior belong to later work.
 
+## Preview a reply with the LLM client
+
+The default `LLM_PROVIDER=mock` requires no API key and makes no external requests. Check its configuration:
+
+```bash
+curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/llm/status
+```
+
+The response is `{"provider":"mock","model":"mock-draft-v1","configured":true}`. In Swagger, open `POST /api/tickets/{resource_id}/draft`, enter an existing ticket ID, and execute it without a request body. The response includes `summary`, `category`, `draft_reply`, provider/model metadata, and `requires_human_review: true`. Mock replies explicitly state that no real model was called. This preview does not save a draft or change the ticket.
+
+To enable OpenAI, set `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, and an explicit `OPENAI_MODEL` in your local `.env`, then recreate the API service:
+
+```bash
+docker compose up --detach --no-build --force-recreate --wait api
+```
+
+`configured: true` only confirms that the required settings exist. The [Stage 04 guide](docs/STAGE_04.md) explains real-provider setup, structured output, timeouts, token usage, safe errors, and the first manual request. No real OpenAI request has been verified in this iteration because no API key is configured. Automated tests use mock responses and the real SDK with a substituted HTTP transport.
+
+For a complete container smoke test in mock mode only:
+
+```bash
+uv run --locked python scripts/smoke_test.py \
+  --base-url http://127.0.0.1:8001 --timeout 30 --check-llm
+```
+
+This explicit flag first rejects any provider other than configured mock, then creates **three fictional records** (customer, product, ticket) and checks the draft and unchanged ticket. It also includes database and business API checks. Use the ordinary smoke command above when you only want read checks.
+
 ## Optional: run the API on the host
 
 For Python development with automatic reload, start PostgreSQL in Docker and run the API from `.venv`. `.env` contains separate URLs for host Python (`127.0.0.1:5433`) and Compose services (`db:5432`).
@@ -128,7 +156,7 @@ Docker build + Compose readiness + HTTP smoke + database persistence check
 Publish the tested image to GHCR (push to main only)
 ```
 
-The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks health/readiness, all twelve operations in OpenAPI and four resource lists through HTTP, and compares saved records before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
+The Python job applies migrations to a separate PostgreSQL test database and runs `alembic check` to detect differences between the schema and models. The container job builds once, starts `db → migrate → api`, checks health/readiness and the business API, validates a mock draft, and compares saved records before and after removing and recreating the Compose containers while retaining the PostgreSQL volume. CI explicitly selects mock with no OpenAI credentials. The draft smoke creates disposable fixture records only after confirming mock configuration. A failed check blocks publication. The publication job receives that same image as an artifact and does not rebuild it.
 
 Images use `ghcr.io/merkertg/ai-support-agent:sha-<full-commit-SHA>`. The current tip of `main` can also update `latest`. The workflow delivers an image to the registry; running it on an external server is a later step.
 
@@ -144,7 +172,8 @@ app/
   api/
     routes.py            # Thin HTTP handlers for four resources
     dependencies.py      # Request sessions and safe database errors
-  schemas/               # Validated create bodies and explicit read responses
+  schemas/               # Validated resources and structured draft responses
+  llm/                   # Independent settings, mock/OpenAI clients and safe errors
   services/              # Business checks, queries and explicit transactions
   config.py              # DATABASE_URL from environment or .env
   db/
@@ -162,6 +191,8 @@ tests/
   test_readiness.py      # Database readiness behavior
   test_config.py         # Environment configuration
   test_smoke_test.py     # Real HTTP smoke CLI regression tests
+  test_llm.py            # Real SDK parser with a substituted HTTP transport
+  test_drafts_api.py     # Draft/status HTTP behavior without paid requests
 scripts/
   smoke_test.py          # Health, readiness and business API checks
 docs/
@@ -170,6 +201,7 @@ docs/
   STAGE_01.md            # FastAPI learning guide in Russian
   STAGE_02.md            # Database learning guide in Russian
   STAGE_03.md            # Business API learning guide in Russian
+  STAGE_04.md            # LLM integration learning guide in Russian
   DEVELOPMENT_LOG.md     # Step-by-step implementation log
 compose.yaml             # PostgreSQL, migration, API and isolated test database
 alembic.ini              # Migration configuration without a stored database URL
@@ -188,7 +220,7 @@ README.md
 | 01 | Initialize Python project, FastAPI, health endpoint, first tests | Implemented; verify with the commands above |
 | 02 | PostgreSQL, SQLAlchemy models, Alembic migrations | Implemented; includes readiness, demo records and database checks |
 | 03 | Customer, product, license, and ticket REST APIs | Implemented: create, list and read with PostgreSQL integration tests |
-| 04 | LLM API integration and error handling | Planned |
+| 04 | LLM draft previews and error handling | Implemented; mock and SDK transport tested, live OpenAI validation requires credentials |
 | 05 | Tool calling and the agent execution loop | Planned |
 | 06 | RAG, embeddings, and Qdrant document search | Planned |
 | 07 | LangGraph workflow and human review | Planned |
@@ -202,7 +234,8 @@ README.md
 - [Stage 01 learning guide](docs/STAGE_01.md)
 - [Stage 02 learning guide](docs/STAGE_02.md)
 - [Stage 03 learning guide](docs/STAGE_03.md)
+- [Stage 04 learning guide](docs/STAGE_04.md)
 - [Development log](docs/DEVELOPMENT_LOG.md)
 - [CI/CD and Docker guide](docs/CI_CD.md)
 
-TechFlow and the support scenarios are fictional. The current implementation requires no LLM API key. The business API persists customer, product, license, and ticket records. AI behavior, authentication, and an operator interface remain future work.
+TechFlow and the support scenarios are fictional. The default mock mode requires no LLM API key; OpenAI mode requires an explicit key and model. The business API persists customer, product, license, and ticket records. The current LLM feature is a read-only draft preview. Tool calling, RAG, authentication, and an operator interface remain future work.
