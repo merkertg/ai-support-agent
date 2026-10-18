@@ -41,6 +41,8 @@ Stage learning guides in Russian:
 - [Stage 06: knowledge base and RAG](docs/STAGE_06.md)
 - [Stage 07: LangGraph workflow and human review](docs/STAGE_07.md)
 - [CI/CD and Docker guide](docs/CI_CD.md)
+- [Наглядное руководство PDF](docs/guide/ai-support-agent-guide.pdf) и [его пересборка](docs/guide/README.md)
+- [Полная проверка проекта](docs/VERIFICATION.md)
 
 Design and history:
 

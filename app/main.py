@@ -9,6 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 from fastapi import Depends, FastAPI, HTTPException
+from psycopg import Error as PsycopgError
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -135,3 +136,5 @@ app.add_exception_handler(AgentRunFailure, agent_error_handler)
 app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(ResourceError, resource_error_handler)
 app.add_exception_handler(SQLAlchemyError, database_error_handler)
+# PostgresSaver использует psycopg напрямую, без обёртки SQLAlchemy.
+app.add_exception_handler(PsycopgError, database_error_handler)

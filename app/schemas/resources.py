@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     ConfigDict,
@@ -21,8 +22,19 @@ StrictPositiveId = Annotated[int, Field(gt=0, le=MAX_ID, strict=True)]
 Name = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
 ]
+
+
+def product_code_not_reserved(value: str) -> str:
+    """Не смешивать код продукта со служебной областью общих статей Qdrant."""
+    if value == "general":
+        raise ValueError("Код general зарезервирован для общих статей базы знаний")
+    return value
+
+
 ProductCode = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+    AfterValidator(product_code_not_reserved),
 ]
 LicenseKey = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)

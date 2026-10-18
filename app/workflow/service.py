@@ -5,12 +5,13 @@ from contextlib import suppress
 from uuid import uuid4
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.knowledge.index import IndexFactory
-from app.models import AgentRun, Ticket, TicketMessage
+from app.models import AgentRun, AgentSuggestion, Ticket, TicketMessage
 from app.schemas.agents import AgentRunRead, AnalyzeRequest
 from app.schemas.reviews import (
     ReviewRequest,
@@ -93,10 +94,18 @@ def start_analysis(
             context=context,
         )
     except Exception:
-        # Запуск не начался (нет обращения, неверные настройки, сбой БД):
-        # пустой поток не оставляем. Сбой удаления не скрывает исходную ошибку.
+        # Агент мог уже закоммитить результат до ошибки checkpointer. Удалять
+        # такой поток нельзя: его восстановят из AgentRun/AgentSuggestion.
+        # При недоступной БД безопаснее сохранить лишний пустой checkpoint,
+        # чем уничтожить состояние успешно завершённого анализа.
         with suppress(Exception):
-            checkpointer.delete_thread(thread_id)
+            session.rollback()
+            stored_run = session.scalar(
+                select(AgentRun.id).where(AgentRun.workflow_thread_id == thread_id)
+            )
+            session.rollback()
+            if stored_run is None:
+                checkpointer.delete_thread(thread_id)
         raise
     if state.get("outcome") == "failed":
         error = state["error"]
@@ -107,15 +116,111 @@ def start_analysis(
 def read_workflow(
     session: Session, run_id: int, checkpointer_factory: CheckpointerFactory
 ) -> WorkflowRead:
-    """Восстановить состояние графа запуска из checkpoint без его продолжения."""
-    run = session.get(AgentRun, run_id)
-    if run is None:
-        raise ResourceNotFound("Запуск агента не найден")
+    """Прочитать граф и при необходимости восстановить checkpoint по фактам БД.
+
+    GET не повторяет анализ или доставку. Восстановление под тем же advisory
+    lock, что и review, синхронизирует checkpoint с уже сохранённым решением.
+    """
+    engine = session.get_bind()
+    with Session(engine) as lock_session, lock_session.begin():
+        run = lock_session.get(AgentRun, run_id)
+        if run is None:
+            raise ResourceNotFound("Запуск агента не найден")
+        if run.workflow_thread_id is None:
+            raise ResourceNotFound(NO_WORKFLOW)
+        suggestion = _run_suggestion(lock_session, run.id)
+        if suggestion is not None:
+            lock_session.execute(select(func.pg_advisory_xact_lock(suggestion.id)))
+            # Решение могло завершиться, пока GET ждал блокировку.
+            lock_session.expire_all()
+        graph = build_graph(checkpointer_factory())
+        restore_workflow(lock_session, run, graph)
+        return workflow_snapshot(run.workflow_thread_id, checkpointer_factory)
+
+
+def _run_suggestion(session: Session, run_id: int) -> AgentSuggestion | None:
+    """Прочитать предложение запуска, не выбирая id из состояния графа."""
+    return session.scalar(
+        select(AgentSuggestion)
+        .where(AgentSuggestion.agent_run_id == run_id)
+        .order_by(AgentSuggestion.id)
+        .limit(1)
+    )
+
+
+def _no_review(suggestion_id: int, review: dict) -> dict:
+    """Восстановление checkpoint никогда не выполняет доставку или отклонение."""
+    raise RuntimeError("Решение при восстановлении процесса недопустимо")
+
+
+def restore_workflow(
+    session: Session, run: AgentRun, graph: CompiledStateGraph
+) -> None:
+    """Согласовать граф с БД без повторения побочных эффектов узлов.
+
+    Сбой возможен между commit приложения и записью checkpoint. Сохранённый
+    запуск и предложение определяют итог; update_state отмечает выполненный
+    узел без его вызова. Для pending выполняется только безопасный interrupt.
+    Вызывающая сторона удерживает advisory lock предложения.
+    """
     thread_id = run.workflow_thread_id
-    session.rollback()
-    if thread_id is None:
-        raise ResourceNotFound(NO_WORKFLOW)
-    return workflow_snapshot(thread_id, checkpointer_factory)
+    config = thread_config(thread_id)
+    snapshot = graph.get_state(config)
+    values = snapshot.values or {}
+    suggestion = _run_suggestion(session, run.id)
+    expected = {
+        "ticket_id": run.ticket_id,
+        "thread_id": thread_id,
+        "run_id": run.id,
+    }
+    if suggestion is not None:
+        expected["suggestion_id"] = suggestion.id
+    if any(values.get(key) not in (None, value) for key, value in expected.items()):
+        # Чужие id в checkpoint не должны направить review на другое обращение.
+        raise ResourceConflict("Состояние процесса не соответствует запуску")
+    complete_ids = all(values.get(key) == value for key, value in expected.items())
+    if run.status == "failed":
+        if not complete_ids or values.get("outcome") != "failed" or snapshot.next:
+            graph.update_state(
+                config, expected | {"outcome": "failed"}, as_node="analyze"
+            )
+        return
+    if run.status != "completed" or suggestion is None:
+        # Running ещё может исполняться другим запросом: его нельзя повторять.
+        return
+    if suggestion.status == "pending":
+        if (
+            not complete_ids
+            or snapshot.next != (REVIEW_NODE,)
+            or values.get("outcome") != "awaiting_review"
+        ):
+            graph.update_state(
+                config, expected | {"outcome": "awaiting_review"}, as_node="analyze"
+            )
+            snapshot = graph.get_state(config)
+        if not any(task.interrupts for task in snapshot.tasks):
+            graph.invoke(
+                None,
+                config,
+                context=WorkflowContext(analyze=_no_analysis, apply_review=_no_review),
+            )
+        return
+    outcome = "delivered" if suggestion.status == "approved" else "rejected"
+    if complete_ids and values.get("outcome") == outcome and not snapshot.next:
+        return
+    ticket = session.get(Ticket, run.ticket_id)
+    graph.update_state(
+        config,
+        expected
+        | {
+            "outcome": outcome,
+            "message_id": suggestion.delivered_message_id,
+            "ticket_status": "waiting_customer"
+            if outcome == "delivered"
+            else ticket.status,
+        },
+        as_node="deliver" if outcome == "delivered" else "reject",
+    )
 
 
 def workflow_snapshot(
@@ -165,6 +270,7 @@ def review_suggestion(
         else:
             graph = build_graph(checkpointer_factory())
             config = thread_config(thread_id)
+            restore_workflow(lock_session, run, graph)
             if graph.get_state(config).next != (REVIEW_NODE,):
                 raise ResourceConflict("Процесс проверки не ожидает решения")
             context = WorkflowContext(

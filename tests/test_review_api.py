@@ -5,10 +5,12 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg import OperationalError
+from psycopg_pool import PoolTimeout
 from sqlalchemy.orm import Session
 
 import app.main as application
-from app.api.dependencies import get_api_session
+from app.api.dependencies import DATABASE_ERROR, get_api_session
 from app.workflow import service as workflow
 
 
@@ -137,3 +139,25 @@ def test_openapi_documents_review_and_workflow() -> None:
     request = schema["components"]["schemas"]["ReviewRequest"]
     assert request["additionalProperties"] is False
     assert set(request["required"]) == {"decision", "reviewer_id"}
+
+
+@pytest.mark.parametrize("error_type", [OperationalError, PoolTimeout])
+@pytest.mark.parametrize("operation", ["read_workflow", "review_suggestion"])
+def test_direct_checkpointer_errors_are_safe_503(
+    client_and_session, monkeypatch: pytest.MonkeyPatch, error_type, operation: str
+) -> None:
+    """Ошибка прямого psycopg/pool возвращает 503 без пароля и внутреннего SQL."""
+    client, _ = client_and_session
+    secret = "postgresql://admin:PRIVATE_PASSWORD@internal-db/private SQL DATA"
+    monkeypatch.setattr(workflow, operation, Mock(side_effect=error_type(secret)))
+    if operation == "read_workflow":
+        response = client.get("/api/agent-runs/7/workflow")
+    else:
+        response = client.post(
+            "/api/suggestions/3/review",
+            json={"decision": "approve", "reviewer_id": 2},
+        )
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": DATABASE_ERROR}
+    assert "PRIVATE_PASSWORD" not in response.text
+    assert "SQL DATA" not in response.text

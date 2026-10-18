@@ -63,11 +63,12 @@ Ordinary `down` retains the named PostgreSQL and Qdrant volumes and their data.
 
 ## Optional: run the API on the host
 
-For Python development with automatic reload, start PostgreSQL in Docker and run the API from `.venv`. `.env` contains separate URLs for host Python (`127.0.0.1:5433`) and Compose services (`db:5432`).
+For Python development with automatic reload, start PostgreSQL and Qdrant in Docker and run the API from `.venv`. `.env` contains separate URLs for host Python (`127.0.0.1:5433`) and Compose services (`db:5432`). Host knowledge search uses `QDRANT_URL=http://127.0.0.1:6335`; Compose uses `QDRANT_URL_DOCKER=http://qdrant:6333`. These values are included in `.env.example`.
 
 ```bash
-docker compose up --detach --wait db
+docker compose up --detach --wait db qdrant
 uv run --locked alembic upgrade head
+uv run --locked python -m app.knowledge.ingest
 uv run --locked uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

@@ -83,6 +83,30 @@ jobs:
         id: dependencies
         run: uv sync --locked
 
+      # Проверяем сам workflow зафиксированным бинарным выпуском с SHA256.
+      # Исключение относится только к новому queue: max, которого ещё нет в 1.7.12.
+      - name: Validate GitHub Actions workflow
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          tools_dir="$RUNNER_TEMP/actionlint"
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          mkdir -p "$tools_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' \
+            '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' \
+            "$archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$tools_dir" actionlint
+          "$tools_dir/actionlint" -shellcheck= -pyflakes= \
+            -ignore 'unexpected key "queue" for "concurrency" section' \
+            .github/workflows/ci.yml
+
+      # Docstrings, локальные ссылки и примеры проверяются на каждом push/PR.
+      - name: Check documentation and project contracts
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: uv run --locked python scripts/check_project.py
+
       - name: Wait for Qdrant
         run: |
           for attempt in $(seq 1 30); do
@@ -128,10 +152,55 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Этап 2. Проверяем реальный запуск образа только после успеха Python CI.
+  # Независимая проверка известных уязвимостей runtime-зависимостей.
+  # Проверяем точные версии из lock; зависимые задания блокируются при ошибке сети.
+  security:
+    name: Audit runtime dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+          python-version: "3.12"
+
+      # Экспорт сохраняет hashes: аудит не выбирает новые версии пакетов.
+      - name: Export locked runtime requirements
+        run: |
+          mkdir -p reports
+          uv export --locked --no-dev --no-emit-project --format requirements.txt \
+            --output-file reports/runtime-requirements.txt > /dev/null
+
+      # Инструмент установлен отдельно; проверяемые зависимости не устанавливаются.
+      # Без --fix, --ignore-vuln или continue-on-error: находка блокирует delivery.
+      - name: Audit all locked runtime dependencies
+        run: |
+          uv tool run --python 3.12 --from pip-audit==2.10.1 pip-audit \
+            --strict --require-hashes --disable-pip --progress-spinner off \
+            -r reports/runtime-requirements.txt \
+            --format json --output reports/pip-audit.json
+
+      # Сохраняем исходный список и отчёт также при найденной уязвимости.
+      # При сетевой ошибке JSON может отсутствовать; сам audit остаётся failed.
+      - name: Upload dependency audit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-audit
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Этап 2. Проверяем образ только после Python CI и аудита зависимостей.
   container:
     name: Build and smoke test Docker
-    needs: checks
+    needs: [checks, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Compose получает явные настройки: файла .env в CI нет.
@@ -161,6 +230,20 @@ jobs:
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag ai-support-agent:ci .
+
+      # HTTP smoke не обнаружит случайный возврат USER root или dev-пакетов.
+      # Отдельно проверяем контракт финального runtime-образа до запуска Compose.
+      - name: Check runtime user and excluded development tools
+        run: |
+          docker run --rm --entrypoint python ai-support-agent:ci -c '
+          import importlib.util
+          import os
+          import shutil
+          assert os.getuid() == 10001 and os.getgid() == 10001
+          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "ruff"))
+          assert shutil.which("uv") is None
+          print("OK runtime: UID/GID 10001; pytest, Ruff and uv excluded")
+          '
 
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
       # --no-build гарантирует использование только что собранного образа.

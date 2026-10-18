@@ -10,7 +10,7 @@ Where each part of the application, tests, and documentation lives.
 app/
   main.py                # /health, /ready, API lifecycle and router registration
   api/
-    routes.py            # Thin HTTP handlers for four resources
+    routes.py            # Thin HTTP handlers for five resources
     agents.py            # Agent analysis and saved-run routes
     knowledge.py         # Knowledge search and index status routes
     reviews.py           # Suggestion queue, review decision and workflow state
@@ -48,8 +48,11 @@ tests/
   conftest.py            # In-memory checkpointer for every test by default
 scripts/
   smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
+  check_project.py       # Docstrings, Markdown links, Bash and JSON examples
+  build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
 docs/
   instructions/          # Quickstart, API usage, testing, CI and this file
+  guide/                 # PDF guide, build instructions and verification evidence
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian
   STAGE_01.md            # FastAPI learning guide in Russian

@@ -467,3 +467,180 @@ def test_upgrade_from_stage06_keeps_runs_and_suggestions(
         assert (row.final_content, row.delivered_message_id) == (None, None)
         assert session.get(Ticket, ticket) is not None
         assert session.get(Customer, customer) is not None
+
+
+def test_missing_checkpoint_is_restored_before_review(
+    client: TestClient, ticket: dict, savers: Savers, migrated_engine: Engine
+) -> None:
+    """Потеря checkpoint не теряет pending: GET восстанавливает ожидание решения."""
+    run = analyze(client, ticket)
+    savers.saver.delete_thread(run["workflow_thread_id"])
+    response = client.get(f"/api/agent-runs/{run['id']}/workflow")
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "awaiting_review"
+    user = reviewer(client)
+    approved = client.post(
+        f"/api/suggestions/{run['suggestion']['id']}/review",
+        json={"decision": "approve", "reviewer_id": user["id"]},
+    )
+    assert approved.status_code == 200, approved.text
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(AgentRun)) == 1
+        assert session.scalar(select(func.count()).select_from(TicketMessage)) == 1
+
+
+def fail_saver_when_armed(monkeypatch: pytest.MonkeyPatch, savers: Savers) -> dict:
+    """Подменить все записи saver: флаг включается после бизнес-commit."""
+    state = {"failed": False}
+    original_put, original_writes = savers.saver.put, savers.saver.put_writes
+
+    def put(*args, **kwargs):
+        """Заменить только запись checkpoint после включения тестового отказа."""
+        if state["failed"]:
+            raise OSError("simulated checkpoint outage")
+        return original_put(*args, **kwargs)
+
+    def put_writes(*args, **kwargs):
+        """Отклонить pending writes: сохранённый результат не скроет отказ."""
+        if state["failed"]:
+            raise OSError("simulated checkpoint outage")
+        return original_writes(*args, **kwargs)
+
+    monkeypatch.setattr(savers.saver, "put", put)
+    monkeypatch.setattr(savers.saver, "put_writes", put_writes)
+    return state
+
+
+def test_checkpoint_outage_after_analysis_preserves_durable_run(
+    client: TestClient,
+    ticket: dict,
+    savers: Savers,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Отказ checkpoint после commit анализа восстанавливается без второго агента."""
+    from app.services import agents
+
+    fault = fail_saver_when_armed(monkeypatch, savers)
+    original_analyze = agents.analyze_ticket
+
+    def committed_analysis(*args, **kwargs):
+        """Завершить настоящий анализ до отказа сохранения состояния графа."""
+        result = original_analyze(*args, **kwargs)
+        fault["failed"] = True
+        return result
+
+    monkeypatch.setattr(agents, "analyze_ticket", committed_analysis)
+    with pytest.raises(OSError, match="checkpoint outage"):
+        client.post(f"/api/tickets/{ticket['id']}/analyze")
+    fault["failed"] = False
+    with Session(migrated_engine) as session:
+        run = session.scalar(select(AgentRun))
+        run_id, thread_id = run.id, run.workflow_thread_id
+        assert run.status == "completed"
+        assert session.scalar(select(func.count()).select_from(AgentRun)) == 1
+    assert savers.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+    state = client.get(f"/api/agent-runs/{run_id}/workflow")
+    assert state.status_code == 200, state.text
+    assert state.json()["state"] == "awaiting_review"
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(AgentRun)) == 1
+        assert session.scalar(select(func.count()).select_from(AgentSuggestion)) == 1
+        assert session.scalar(select(func.count()).select_from(TicketMessage)) == 0
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_checkpoint_outage_after_review_does_not_repeat_delivery(
+    client: TestClient,
+    ticket: dict,
+    savers: Savers,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    """После commit решения GET восстанавливает итог без второго сообщения."""
+    from app.services import reviews
+
+    run, user = analyze(client, ticket), reviewer(client)
+    fault = fail_saver_when_armed(monkeypatch, savers)
+    original_apply = reviews.apply_review
+
+    def committed_review(*args, **kwargs):
+        """Сохранить решение в реальной БД, затем выключить записи checkpointer."""
+        result = original_apply(*args, **kwargs)
+        fault["failed"] = True
+        return result
+
+    monkeypatch.setattr(reviews, "apply_review", committed_review)
+    path = f"/api/suggestions/{run['suggestion']['id']}/review"
+    body = {"decision": decision, "reviewer_id": user["id"], "comment": "Проверено"}
+    with pytest.raises(OSError, match="checkpoint outage"):
+        client.post(path, json=body)
+    fault["failed"] = False
+    state = client.get(f"/api/agent-runs/{run['id']}/workflow")
+    assert state.status_code == 200, state.text
+    assert state.json()["state"] == (
+        "delivered" if decision == "approve" else "rejected"
+    )
+    assert state.json()["next"] == []
+    assert client.post(path, json=body).status_code == 409
+    with Session(migrated_engine) as session:
+        expected = 1 if decision == "approve" else 0
+        assert (
+            session.scalar(select(func.count()).select_from(TicketMessage)) == expected
+        )
+        assert session.get(AgentSuggestion, run["suggestion"]["id"]).status == (
+            "approved" if decision == "approve" else "rejected"
+        )
+
+
+def test_review_recovers_pending_checkpoint_without_prior_get(
+    client: TestClient, ticket: dict, savers: Savers, migrated_engine: Engine
+) -> None:
+    """POST review сам восстанавливает пропавшее ожидание, не требуя отдельного GET."""
+    run, user = analyze(client, ticket), reviewer(client)
+    savers.saver.delete_thread(run["workflow_thread_id"])
+    response = client.post(
+        f"/api/suggestions/{run['suggestion']['id']}/review",
+        json={"decision": "approve", "reviewer_id": user["id"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["workflow"]["state"] == "delivered"
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(TicketMessage)) == 1
+
+
+def test_pending_after_rolled_back_review_can_receive_new_decision(
+    client: TestClient,
+    ticket: dict,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ошибка БД до commit не расходует ожидание: новый POST может отклонить ответ."""
+    from psycopg import OperationalError
+
+    from app.services import reviews
+
+    run, user = analyze(client, ticket), reviewer(client)
+    original_apply = reviews.apply_review
+
+    def failed_transaction(*args, **kwargs):
+        """Имитировать недоступность БД до сохранения решения сотрудника."""
+        raise OperationalError("simulated database outage")
+
+    monkeypatch.setattr(reviews, "apply_review", failed_transaction)
+    path = f"/api/suggestions/{run['suggestion']['id']}/review"
+    failed = client.post(path, json={"decision": "approve", "reviewer_id": user["id"]})
+    assert failed.status_code == 503, failed.text
+    monkeypatch.setattr(reviews, "apply_review", original_apply)
+    retried = client.post(
+        path,
+        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Исправить"},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["workflow"]["state"] == "rejected"
+    with Session(migrated_engine) as session:
+        assert session.scalar(select(func.count()).select_from(TicketMessage)) == 0
+        assert (
+            session.get(AgentSuggestion, run["suggestion"]["id"]).status == "rejected"
+        )

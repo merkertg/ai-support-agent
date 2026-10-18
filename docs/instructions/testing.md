@@ -7,6 +7,7 @@ Lint, formatting, unit and integration tests, and migration checks.
 ## Verify
 
 ```bash
+uv run --locked python scripts/check_project.py
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked pytest -v
@@ -29,3 +30,5 @@ To inspect the development migration state separately:
 uv run --locked alembic current
 uv run --locked alembic check
 ```
+
+`python scripts/check_project.py` checks every Python function/class docstring, local Markdown links, fenced code blocks, Bash syntax (`bash -n`, without executing examples), and JSON examples. [The verification report](../VERIFICATION.md) records the latest complete run and its limits.

@@ -93,6 +93,10 @@ def test_checksum_changes_only_with_file_content(tmp_path: Path) -> None:
         ("---\ndocument_key: KB-A\ndocument_key: KB-B\n---\nТекст", "указано дважды"),
         ("---\ndocument_key: kb-lower\ntitle: A\n---\nТекст", "document_key"),
         ("---\ntitle: A\n---\nТекст", "document_key"),
+        (
+            "---\ndocument_key: KB-A\ntitle: A\nproduct_code: general\n---\nТекст",
+            "product_code",
+        ),
         ("---\ndocument_key: KB-A\ntitle: A\nauthor: X\n---\nТекст", "author"),
         ("---\ndocument_key: KB-A\ntitle: A\n---\n\n## Пусто\n\n", "не содержит"),
     ],
@@ -125,3 +129,31 @@ def test_duplicate_keys_and_missing_directory_are_rejected(tmp_path: Path) -> No
         load_documents(tmp_path)
     with pytest.raises(KnowledgeSourceError, match="не найден"):
         load_documents(tmp_path / "missing")
+
+
+def test_reserved_product_scope_is_rejected_before_index_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Статья продукта general не может попасть в общий индекс через ingest."""
+    from unittest.mock import Mock
+
+    from app.knowledge import ingest
+    from app.knowledge.config import KnowledgeSettings
+
+    write(
+        tmp_path,
+        "private-product.md",
+        "---\ndocument_key: KB-PRIVATE\ntitle: Частная статья\n"
+        "product_code: general\n---\nЧастная инструкция продукта.",
+    )
+    monkeypatch.setattr(
+        ingest, "get_knowledge_settings", lambda: KnowledgeSettings(_env_file=None)
+    )
+    index_factory = Mock(side_effect=AssertionError("Индекс нельзя открывать"))
+    engine_factory = Mock(side_effect=AssertionError("БД нельзя открывать"))
+    monkeypatch.setattr(ingest, "open_index", index_factory)
+    monkeypatch.setattr(ingest, "get_engine", engine_factory)
+    assert ingest.main(["--dir", str(tmp_path)]) == 1
+    assert "product_code" in capsys.readouterr().err
+    index_factory.assert_not_called()
+    engine_factory.assert_not_called()

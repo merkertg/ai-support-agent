@@ -19,7 +19,7 @@ Start by creating a customer and product. Use the returned IDs to create their l
 
 Creation returns HTTP 201; reads return 200. Invalid input returns 422, an unknown record or missing creation reference returns 404, a duplicate unique value returns 409, and an unavailable database returns a safe 503. Lists return JSON arrays ordered by ID, with `offset=0` and `limit=20` by default (maximum 100). License lists support `customer_id`, `product_id`, and `license_key`; ticket lists support `customer_id`, `product_id`, and `status`. Filters without matches return an empty array.
 
-New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. This stage adds create/read operations; editing, deletion, authentication, and AI behavior belong to later work.
+New tickets always start as `open`. License dates must include a time zone, and expiration cannot precede issuance. The API uses explicit transactions; a failed request must not leave a partial write. The resource API provides create/read operations. The agent and human-review workflow below implement analysis and controlled delivery; general editing, deletion, and authentication remain future work.
 
 ## Preview a reply with the LLM client
 

@@ -86,7 +86,14 @@ def review_suggestion(
 @router.get(
     "/agent-runs/{resource_id}/workflow",
     response_model=WorkflowRead,
-    responses={404: {"model": ErrorRead, "description": "Процесс не найден"}},
+    responses={
+        404: {"model": ErrorRead, "description": "Процесс не найден"},
+        409: {
+            "model": ErrorRead,
+            "description": "Идентификаторы процесса не совпадают",
+        },
+        503: {"model": ErrorRead, "description": "База данных временно недоступна"},
+    },
 )
 def get_workflow(
     resource_id: ResourceId,
@@ -95,5 +102,5 @@ def get_workflow(
         CheckpointerFactory, Depends(get_checkpointer_factory)
     ],
 ) -> WorkflowRead:
-    """Прочитать состояние графа запуска из checkpoint без его продолжения."""
+    """Прочитать граф и восстановить checkpoint по БД без повторной доставки."""
     return workflow.read_workflow(session, resource_id, checkpointer_factory)

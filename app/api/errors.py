@@ -2,6 +2,7 @@
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from psycopg import Error as PsycopgError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.dependencies import DATABASE_ERROR
@@ -16,7 +17,7 @@ async def resource_error_handler(
 
 
 async def database_error_handler(
-    request: Request, error: SQLAlchemyError
+    request: Request, error: SQLAlchemyError | PsycopgError
 ) -> JSONResponse:
-    """Защитить HTTP-ответ даже при замене зависимости сессии в интеграции."""
+    """Скрыть SQL/адреса из ошибок ORM и прямого драйвера checkpointer."""
     return JSONResponse(status_code=503, content={"detail": DATABASE_ERROR})

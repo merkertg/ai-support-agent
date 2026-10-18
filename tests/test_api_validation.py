@@ -53,6 +53,8 @@ def validation_client() -> Iterator[TestClient]:
         ("customers", {"unexpected": "запрещено"}),
         ("products", {"name": " "}),
         ("products", {"code": " "}),
+        ("products", {"code": "general"}),
+        ("products", {"code": " general "}),
         ("products", {"code": "x" * 65}),
         ("products", {"description": "x" * 10001}),
         ("products", {"unexpected": "запрещено"}),
