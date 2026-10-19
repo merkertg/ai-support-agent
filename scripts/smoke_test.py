@@ -3,13 +3,15 @@
 Маршруты /api/* требуют токен сотрудника. Скрипт читает его из переменной
 окружения API_TOKEN (не из аргументов: они видны в списке процессов) и
 никогда не печатает. Для --check-review нужен токен роли admin: проверка
-создаёт учебного оператора, выдаёт и отзывает его токен.
+создаёт учебного оператора, выдаёт и отзывает его токен. --check-privacy тоже
+требует admin: он обезличивает созданного им же учебного клиента.
 """
 
 import argparse
 import json
 import math
 import os
+import secrets
 import sys
 import time
 from urllib.error import HTTPError, URLError
@@ -805,6 +807,161 @@ def review_existing_run(
     check_review(url, paths, deadline, run, token, me, verify_roles=False)
 
 
+ERASED_TEXT = "[удалено]"
+# Одно обращение, одно доставленное сообщение, один запуск, предложение и поток.
+PRIVACY_REPORT = {
+    "tickets": 1,
+    "messages": 1,
+    "agent_runs": 1,
+    "suggestions": 1,
+    "workflow_threads": 1,
+}
+
+
+def check_privacy(url: str, paths: dict, deadline: float, token: str, me: dict) -> str:
+    """Обезличить учебного клиента и убедиться, что API не отдаёт его данные.
+
+    Создаются клиент, продукт, обращение, mock-анализ и одобренный ответ, в
+    которых есть уникальный маркер. После обезличивания ни клиент, ни
+    обращение, ни сообщения, ни запуск, ни поток LangGraph не содержат маркер.
+    Маркер выводится, чтобы CI поискал его во всех таблицах PostgreSQL.
+    """
+    for prefix, suffix, method in (
+        ("/api/customers/{", "}/erase", "post"),
+        ("/api/tickets/{", "}/analyze", "post"),
+        ("/api/tickets/{", "}/messages", "get"),
+        ("/api/agent-runs/{", "}/workflow", "get"),
+        ("/api/suggestions/{", "}/review", "post"),
+    ):
+        if not has_operation(paths, prefix, suffix, method):
+            raise SmokeTestError(
+                f"/openapi.json: отсутствует операция {method.upper()} {prefix}{suffix}"
+            )
+    if me.get("role") != "admin":
+        raise SmokeTestError("--check-privacy требует токен роли admin в API_TOKEN")
+    marker = f"privacy-{secrets.token_hex(6)}"
+    email = f"{marker}@example.com"
+    customer = create_smoke_record(
+        token,
+        url,
+        "customers",
+        {"name": f"Smoke {marker}", "email": email, "company": f"Smoke {marker}"},
+        deadline,
+    )
+    # Продукт не персональные данные: его код без маркера остаётся после проверки.
+    product = create_smoke_record(
+        token,
+        url,
+        "products",
+        {"name": "Smoke privacy", "code": f"smoke-erase-{secrets.token_hex(4)}"},
+        deadline,
+    )
+    ticket = create_smoke_record(
+        token,
+        url,
+        "tickets",
+        {
+            "customer_id": customer["id"],
+            "product_id": product["id"],
+            "subject": f"Smoke {marker}",
+            "description": f"Smoke: обращение {marker} для проверки обезличивания",
+        },
+        deadline,
+    )
+    analyze = f"/api/tickets/{ticket['id']}/analyze"
+    run = json_object(
+        api_fetch(
+            token,
+            f"{url}{analyze}",
+            deadline,
+            method="POST",
+            payload={},
+            expected_status=201,
+        ),
+        analyze,
+    )
+    suggestion = run.get("suggestion")
+    if (
+        type(run.get("id")) is not int
+        or not isinstance(suggestion, dict)
+        or type(suggestion.get("id")) is not int
+    ):
+        raise SmokeTestError(f"{analyze}: нет сохранённого запуска с предложением")
+    api_fetch(
+        token,
+        f"{url}/api/suggestions/{suggestion['id']}/review",
+        deadline,
+        method="POST",
+        payload={"decision": "approve", "final_content": f"Smoke: ответ {marker}"},
+    )
+    erase = f"/api/customers/{customer['id']}/erase"
+    report = json_object(
+        api_fetch(
+            token,
+            f"{url}{erase}",
+            deadline,
+            method="POST",
+            payload={"confirm_email": email},
+        ),
+        erase,
+    )
+    if report.get("customer_id") != customer["id"] or any(
+        report.get(key) != value for key, value in PRIVACY_REPORT.items()
+    ):
+        raise SmokeTestError(f"{erase}: неверный отчёт обезличивания")
+    reads = {
+        "клиент": f"/api/customers/{customer['id']}",
+        "обращение": f"/api/tickets/{ticket['id']}",
+        "сообщения": f"/api/tickets/{ticket['id']}/messages",
+        "запуск": f"/api/agent-runs/{run['id']}",
+        "процесс": f"/api/agent-runs/{run['id']}/workflow",
+    }
+    bodies = {
+        name: api_fetch(token, f"{url}{path}", deadline) for name, path in reads.items()
+    }
+    for name, body in bodies.items():
+        if marker.encode() in body:
+            raise SmokeTestError(f"обезличивание: {name} содержит данные клиента")
+    stored = json_object(bodies["клиент"], reads["клиент"])
+    case = json_object(bodies["обращение"], reads["обращение"])
+    flow = json_object(bodies["процесс"], reads["процесс"])
+    if (
+        stored.get("erased_at") is None
+        or case.get("anonymized_reason") != "customer_request"
+        or case.get("status") != "closed"
+        or case.get("description") != ERASED_TEXT
+        or flow.get("state") != "delivered"
+    ):
+        raise SmokeTestError("обезличивание: клиент, обращение или процесс не отмечены")
+    # Повтор и новая запись для обезличенного клиента отклоняются.
+    api_fetch(
+        token,
+        f"{url}{erase}",
+        deadline,
+        method="POST",
+        payload={"confirm_email": email},
+        expected_status=409,
+    )
+    api_fetch(
+        token,
+        f"{url}/api/tickets",
+        deadline,
+        method="POST",
+        payload={
+            "customer_id": customer["id"],
+            "product_id": product["id"],
+            "subject": "Smoke",
+            "description": "Smoke: обращение после обезличивания",
+        },
+        expected_status=409,
+    )
+    print(
+        f"OK privacy: клиент №{customer['id']} обезличен, маркер {marker} "
+        "не найден в ответах API; повтор и новое обращение — HTTP 409"
+    )
+    return marker
+
+
 def run_checks(
     url: str,
     timeout: float,
@@ -816,6 +973,7 @@ def run_checks(
     check_review_flow: bool = False,
     review_run_id: int | None = None,
     token: str | None = None,
+    check_privacy_flow: bool = False,
 ) -> None:
     """Проверить HTTP-контракт и при явном флаге готовность БД за один срок.
 
@@ -829,7 +987,13 @@ def run_checks(
     check_llm = check_llm or check_agent
     check_knowledge_base = check_knowledge_base or check_agent
     # Предметное API требует БД, поэтому --check-api включает и /ready.
-    check_api = check_api or check_llm or check_knowledge_base or bool(review_run_id)
+    check_api = (
+        check_api
+        or check_llm
+        or check_knowledge_base
+        or bool(review_run_id)
+        or check_privacy_flow
+    )
     check_database = check_database or check_api
     if check_api and not token:
         raise SmokeTestError(
@@ -899,7 +1063,7 @@ def run_checks(
     me = check_authentication(url, paths, deadline, token)
     check_business_api(url, paths, deadline, token)
     # Все проверки режима (mock LLM, mock-эмбеддинги) выполняются до записей.
-    if check_llm:
+    if check_llm or check_privacy_flow:
         require_mock_llm(url, paths, deadline, token)
     if check_knowledge_base:
         check_knowledge(url, paths, deadline, token)
@@ -911,6 +1075,8 @@ def run_checks(
                 check_review(url, paths, deadline, run, token, me)
     if review_run_id is not None:
         review_existing_run(url, paths, deadline, review_run_id, token, me)
+    if check_privacy_flow:
+        check_privacy(url, paths, deadline, token, me)
 
 
 def use_utf8_output() -> None:
@@ -996,6 +1162,14 @@ def main() -> int:
             "токену в API_TOKEN достаточно роли reviewer"
         ),
     )
+    parser.add_argument(
+        "--check-privacy",
+        action="store_true",
+        help=(
+            "только mock: создать учебного клиента с обращением и одобренным "
+            "ответом, обезличить его и проверить ответы API; нужен токен admin"
+        ),
+    )
     args = parser.parse_args()
     try:
         run_checks(
@@ -1009,6 +1183,7 @@ def main() -> int:
             check_review_flow=args.check_review,
             review_run_id=args.review_run,
             token=os.environ.get(TOKEN_ENV, "").strip() or None,
+            check_privacy_flow=args.check_privacy,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

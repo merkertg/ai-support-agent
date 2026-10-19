@@ -29,8 +29,10 @@ app/
   services/              # Business checks, queries and explicit transactions
                          # run_recovery.py finishes abandoned running analyses
                          # auth.py issues, checks and revokes hashed staff tokens
+                         # privacy.py erases a customer and applies ticket retention
   config.py              # DATABASE_URL and the write rate limit from env or .env
   tokens.py              # CLI: python -m app.tokens issue | list | revoke
+  privacy.py             # CLI: python -m app.privacy erase | retention
   console.py             # UTF-8 output for command-line tools on any OS
   observability.py       # JSON log, X-Request-ID middleware, safe error fields
   db/
@@ -42,7 +44,8 @@ app/
 migrations/
   env.py                 # Alembic execution and database URL handling
   versions/              # Stage 02 schema, 05 agent runs, 06 index registry, 07 review,
-                         # 0005 staff tokens and the reviewer role
+                         # 0005 staff tokens and the reviewer role,
+                         # 0006 erasure and retention stamps
 knowledge/               # Fictional Markdown support articles for the knowledge base
 operator_ui/
   main.py                # Streamlit entry point: streamlit run operator_ui/main.py
@@ -56,7 +59,8 @@ evaluations/
   thresholds.json        # Gates fixed before the first measurement
 tests/
   integration/           # Real PostgreSQL, migrations and complete HTTP workflows
-                         # (test_backup_restore.py: backup → wipe → restore on db-test/qdrant-test)
+                         # (test_backup_restore.py: backup → wipe → restore on db-test/qdrant-test;
+                         # test_privacy_erasure.py: erasure and retention, every table searched)
   test_health.py         # Standalone API behavior
   test_readiness.py      # Database readiness behavior
   test_config.py         # Environment configuration
@@ -82,10 +86,11 @@ tests/
   test_update_dependencies.py # Weekly dependency PR preparation and writer
   test_project_checks.py # Docstrings, links, Bash and PowerShell examples
   test_backup.py         # Backup, verify and restore with fake Docker and fake Qdrant
+  test_privacy.py        # Trace and result scrubbing, erase API contract, privacy CLI
   conftest.py            # In-memory checkpointer and a test admin for unit tests
                          # (integration tests send real tokens instead)
 scripts/
-  smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
+  smoke_test.py          # Health, readiness, API, knowledge, draft, agent, review, erasure
   check_project.py       # Docstrings, Markdown links, Bash, PowerShell and JSON examples
   check_local_start.py   # Start API and UI as real processes on this computer
   release_delivery.py    # Validate release tags, export and publish tested images
@@ -95,7 +100,7 @@ scripts/
   build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
   backup.py              # Backup, verify and restore PostgreSQL + Qdrant of a Compose stack
 docs/
-  instructions/          # Quickstart, Windows, API usage, testing, backup, CI and this file
+  instructions/          # Quickstart, Windows, API usage, testing, backup, privacy, CI, this file
   guide/                 # PDF guide, build instructions and verification evidence
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian

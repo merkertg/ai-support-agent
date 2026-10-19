@@ -7,6 +7,8 @@ import pytest
 
 from operator_ui.client import (
     ANALYZE_CONFLICT,
+    ERASE_CONFLICT,
+    ERASE_INVALID,
     REVIEW_CONFLICT,
     APIClient,
     APIError,
@@ -309,3 +311,27 @@ def test_auth_and_rate_limit_errors_are_explained(status, headers, expected):
     assert raised.value.status_code == status
     assert "PRIVATE" not in str(raised.value)
     assert TOKEN not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(409, ERASE_CONFLICT), (422, ERASE_INVALID)]
+)
+def test_erase_customer_explains_refusals(status, expected):
+    """409 и 422 обезличивания объясняют причину без текста ответа сервера."""
+    captured = []
+
+    def handler(request):
+        """Запомнить запрос и вернуть отказ с внутренним текстом."""
+        captured.append(request)
+        return httpx.Response(status, json={"detail": "internal detail"})
+
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(APIError) as raised:
+            client.erase_customer(5, "anna@example.com")
+    assert str(raised.value).startswith(expected)
+    assert "internal" not in str(raised.value)
+    assert captured[0].method == "POST"
+    assert captured[0].url.path == "/api/customers/5/erase"
+    assert json.loads(captured[0].content) == {"confirm_email": "anna@example.com"}

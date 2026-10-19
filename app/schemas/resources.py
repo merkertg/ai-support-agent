@@ -48,6 +48,8 @@ Description = Annotated[
 LicenseStatus = Literal["active", "expired", "revoked"]
 TicketPriority = Literal["low", "medium", "high", "critical"]
 TicketStatus = Literal["open", "in_progress", "waiting_customer", "resolved", "closed"]
+# Почему удалены тексты обращения: запрос клиента или истёкший срок хранения.
+AnonymizationReason = Literal["customer_request", "retention"]
 # Закрытое обращение не анализируется и не получает доставку ответа.
 CLOSED_TICKET_STATUSES = frozenset({"resolved", "closed"})
 UserRole = Literal["operator", "reviewer", "admin"]
@@ -85,6 +87,8 @@ class CustomerRead(ReadSchema):
     email: str
     company: str | None
     created_at: datetime
+    # Не NULL: клиент обезличен, имя и email — заглушки, а не его данные.
+    erased_at: datetime | None = None
 
 
 class ProductCreate(CreateSchema):
@@ -158,6 +162,9 @@ class TicketRead(ReadSchema):
     status: TicketStatus
     created_at: datetime
     updated_at: datetime
+    # Не NULL: тексты удалены по запросу клиента или по сроку хранения.
+    anonymized_at: datetime | None = None
+    anonymized_reason: AnonymizationReason | None = None
 
 
 class UserCreate(CreateSchema):

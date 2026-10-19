@@ -8,8 +8,8 @@ from app.schemas.agents import AgentRunRead
 from app.schemas.operator import DashboardRead, TicketStatusUpdate
 from app.schemas.resources import CLOSED_TICKET_STATUSES, TicketRead
 from app.schemas.reviews import TicketMessageRead
-from app.services.agents import run_read
-from app.services.errors import ResourceNotFound
+from app.services.agents import TICKET_ANONYMIZED, run_read
+from app.services.errors import ResourceConflict, ResourceNotFound
 
 
 def list_runs(
@@ -62,6 +62,10 @@ def update_ticket_status(
     )
     if ticket is None:
         raise ResourceNotFound("Обращение не найдено")
+    if ticket.anonymized_at is not None:
+        # Обезличенное обращение закрыто навсегда: его тексты уже удалены.
+        session.rollback()
+        raise ResourceConflict(TICKET_ANONYMIZED)
     ticket.status = payload.status
     session.commit()
     session.refresh(ticket)

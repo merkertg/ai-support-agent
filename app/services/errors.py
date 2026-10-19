@@ -28,3 +28,9 @@ class ResourceForbidden(ResourceError):
     """Сообщить, что роль сотрудника не допускает это действие."""
 
     status_code = 403
+
+
+class ResourceInvalid(ResourceError):
+    """Сообщить, что значения запроса противоречат состоянию записи."""
+
+    status_code = 422

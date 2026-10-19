@@ -13,6 +13,7 @@ from app.api.security import (
     operator_writer,
 )
 from app.models import Customer, License, Product, Ticket, User
+from app.schemas.privacy import CustomerErase, ErasureReport
 from app.schemas.resources import (
     MAX_ID,
     CustomerCreate,
@@ -30,7 +31,7 @@ from app.schemas.resources import (
     UserCreate,
     UserRead,
 )
-from app.services import resources
+from app.services import privacy, resources
 
 # Описываем ожидаемые ошибки в Swagger той же схемой, что возвращают handlers.
 # Любой маршрут требует токен сотрудника; создание — роль и лимит частоты.
@@ -80,6 +81,31 @@ def list_customers(
 def get_customer(resource_id: ResourceId, session: ApiSession) -> Customer:
     """Прочитать существующего клиента по положительному id."""
     return resources.get_customer(session, resource_id)
+
+
+@router.post(
+    "/customers/{resource_id}/erase",
+    response_model=ErasureReport,
+    dependencies=[Depends(admin_writer)],
+    responses=WRITE_RESPONSES
+    | {
+        422: {
+            "model": ErrorRead,
+            "description": "Email подтверждения не совпадает с email клиента",
+        }
+    },
+    tags=["Customers"],
+)
+def erase_customer(
+    resource_id: ResourceId, payload: CustomerErase, session: ApiSession
+) -> ErasureReport:
+    """Обезличить клиента по его запросу; действие необратимо.
+
+    Доступно только администратору и требует ввести текущий email клиента.
+    409 — клиент уже обезличен или у его обращения идёт анализ либо
+    предложение ждёт решения.
+    """
+    return privacy.erase_customer(session, resource_id, str(payload.confirm_email))
 
 
 @router.post(

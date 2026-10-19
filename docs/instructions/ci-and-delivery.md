@@ -26,6 +26,7 @@ Portability: Linux, macOS, Windows — uv.lock + docs + Ruff + unit tests + real
                                   ↓ all three must pass
 API/UI builds + UID/tools gates + arm64 build/start under QEMU + SBOM and Trivy (4 images)
   + Compose + knowledge + HTTP + persistence + backup → clean volumes → restore → smoke
+  + customer erasure through the API → marker searched in every PostgreSQL table
   + Streamlit health/page render + demo review branches + license log leak check
                                   ↓
 Publish the same tested API and UI images (amd64 + arm64) to GHCR under shared tags
@@ -59,7 +60,10 @@ snapshot Qdrant, манифест с SHA256), проверяет её и убе�
 восстанавливается в чистые тома; записи, запуск агента, поиск и демо
 совпадают побайтно, а прежний токен снова проходит smoke `--check-review`.
 Копия остаётся во временном каталоге runner и не загружается артефактом
-([резервное копирование](backup.md)). All third-party images and
+([резервное копирование](backup.md)). Finally `smoke_test.py --check-privacy`
+erases a customer with a unique marker through the API, and the job searches
+every PostgreSQL table, including checkpoint `bytea`, for that marker
+([персональные данные](privacy.md)). All third-party images and
 external actions are pinned by digest or commit.
 
 The `tested-docker-images` artifact contains one `tested-images.tar` archive

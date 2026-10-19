@@ -35,6 +35,11 @@ REVIEW_CONFLICT = (
     "Решение не сохранено: предложение уже рассмотрено или обращение закрыто "
     "(тогда предложение можно только отклонить). Обновите данные."
 )
+ERASE_CONFLICT = (
+    "Клиент не обезличен: он уже обезличен, по его обращению идёт анализ или "
+    "предложение ждёт решения. Обновите данные и проверьте очередь проверки."
+)
+ERASE_INVALID = "Email подтверждения не совпадает с email клиента."
 
 
 @dataclass
@@ -128,6 +133,7 @@ class APIClient:
         payload: dict[str, Any] | None = None,
         expected: type = dict,
         conflict: str | None = None,
+        invalid: str | None = None,
     ) -> Any:
         """Прочитать JSON и скрыть непредвиденный HTML, traceback или сетевой адрес."""
         try:
@@ -145,7 +151,7 @@ class APIClient:
                 "Нет соединения с API. Проверьте запуск сервисов."
             ) from error
         if not response.is_success:
-            self._raise_error(response, conflict)
+            self._raise_error(response, conflict, invalid)
         try:
             value = response.json()
         except ValueError as error:
@@ -155,7 +161,11 @@ class APIClient:
         return value
 
     @staticmethod
-    def _raise_error(response: httpx.Response, conflict: str | None = None) -> None:
+    def _raise_error(
+        response: httpx.Response,
+        conflict: str | None = None,
+        invalid: str | None = None,
+    ) -> None:
         """Сопоставить код ответа безопасной подсказке без вывода тела ошибки."""
         messages = {
             401: UNAUTHORIZED,
@@ -177,6 +187,8 @@ class APIClient:
             pass
         if conflict is not None:
             messages[409] = conflict
+        if invalid is not None:
+            messages[422] = invalid
         retry_after = response.headers.get("Retry-After", "")
         if retry_after.isascii() and retry_after.isdigit():
             messages[429] = (
@@ -284,6 +296,16 @@ class APIClient:
     def dashboard(self) -> dict:
         """Прочитать серверные метрики без расчётов по ограниченной странице списка."""
         return self._request("GET", "/api/dashboard")
+
+    def erase_customer(self, customer_id: int, confirm_email: str) -> dict:
+        """Обезличить клиента по его запросу; действие необратимо и не повторяется."""
+        return self._request(
+            "POST",
+            f"/api/customers/{positive_id(customer_id)}/erase",
+            payload={"confirm_email": confirm_email},
+            conflict=ERASE_CONFLICT,
+            invalid=ERASE_INVALID,
+        )
 
     def update_ticket_status(self, ticket_id: int, status: str) -> dict:
         """Изменить только статус обращения по явному действию оператора."""

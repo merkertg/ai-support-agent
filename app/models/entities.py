@@ -88,6 +88,9 @@ class Customer(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Время обезличивания по запросу клиента: имя и email уже заменены,
+    # тексты его обращений удалены. NULL — обычный клиент.
+    erased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Product(Base):
@@ -142,6 +145,14 @@ class Ticket(Base):
             "'resolved', 'closed')",
             name="status",
         ),
+        CheckConstraint(
+            "anonymized_reason IN ('customer_request', 'retention')",
+            name="anonymized_reason",
+        ),
+        CheckConstraint(
+            "(anonymized_at IS NULL) = (anonymized_reason IS NULL)",
+            name="anonymization",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -163,6 +174,10 @@ class Ticket(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # Тексты обращения, сообщений, запусков агента и предложений удалены.
+    # Причина: customer_request (запрос клиента) или retention (срок хранения).
+    anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    anonymized_reason: Mapped[str | None] = mapped_column(String(20))
 
 
 class TicketMessage(Base):

@@ -155,7 +155,7 @@ curl --silent --show-error --fail-with-body \
   --header "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8001/api/knowledge/status
 ```
 
-Compose rebuilds the API and UI images, applies pending migrations through `migrate`, and recreates only the containers whose image or settings changed. The PostgreSQL and Qdrant volumes are reused, so records, waiting reviews, tokens, and the search index survive. A stack created before staff tokens is upgraded by migration `0005_api_tokens`: existing employees keep their roles but have no tokens, so issue the first administrator token as shown above before using the API or the UI. Run `ingest` again only when articles changed; unchanged articles are skipped. Never add `--volumes` to `down` on a stack whose data you need.
+Compose rebuilds the API and UI images, applies pending migrations through `migrate`, and recreates only the containers whose image or settings changed. The PostgreSQL and Qdrant volumes are reused, so records, waiting reviews, tokens, and the search index survive. A stack created before staff tokens is upgraded by migration `0005_api_tokens`: existing employees keep their roles but have no tokens, so issue the first administrator token as shown above before using the API or the UI. Migration `0006_privacy` only adds empty erasure and retention stamps; existing records are not changed. Run `ingest` again only when articles changed; unchanged articles are skipped. Never add `--volumes` to `down` on a stack whose data you need.
 
 If the command stops with `dependency failed to start` or a missing `docker.sock`, Docker Desktop itself has stopped. Start it, wait until `docker version` shows the server, and run the same command again; the volumes are not affected.
 

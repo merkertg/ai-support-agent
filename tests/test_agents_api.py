@@ -16,7 +16,7 @@ from app.llm.errors import LLMConfigurationError, LLMTimeoutError
 from app.models import AgentRun, AgentSuggestion, Ticket
 from app.schemas.agents import AgentRunRead
 from app.services import agents
-from app.services.agents import AgentRunFailure
+from app.services.agents import TICKET_ANONYMIZED, AgentRunFailure
 
 
 @pytest.fixture
@@ -163,6 +163,27 @@ def test_closed_ticket_has_priority_over_provider_configuration(
         response = client.post("/api/tickets/7/analyze")
     assert response.status_code == 409, response.text
     assert response.json() == {"detail": "Обращение закрыто: анализ недоступен"}
+    factory.assert_not_called()
+    session.add.assert_not_called()
+
+
+def test_anonymized_ticket_is_never_analyzed(
+    agent_dependencies: tuple[Mock, Mock],
+) -> None:
+    """Обезличенное обращение даёт 409 даже после ручного открытия."""
+    session, factory = agent_dependencies
+    session.get.return_value = Ticket(
+        id=7,
+        customer_id=1,
+        product_id=2,
+        status="open",
+        anonymized_at=datetime(2026, 10, 19, tzinfo=UTC),
+        anonymized_reason="customer_request",
+    )
+    with TestClient(application.app) as client:
+        response = client.post("/api/tickets/7/analyze")
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": TICKET_ANONYMIZED}
     factory.assert_not_called()
     session.add.assert_not_called()
 

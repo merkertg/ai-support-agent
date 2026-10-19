@@ -34,6 +34,7 @@ Instructions ([docs/instructions/](docs/instructions/)):
 - [Using the API](docs/instructions/usage.md): staff tokens, roles and rate limit, business records, draft previews, knowledge search, agent, human review
 - [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, coverage gate, offline evaluations, portability checks
 - [Резервное копирование и восстановление](docs/instructions/backup.md): копия PostgreSQL и Qdrant, проверка SHA256, восстановление в чистые тома, откат обновления, хранение секретных копий, PowerShell
+- [Персональные данные](docs/instructions/privacy.md): обезличивание клиента по запросу (интерфейс, API, команда), срок хранения закрытых обращений, что остаётся и ограничения
 - [CI and delivery to GHCR](docs/instructions/ci-and-delivery.md)
 - [Project structure](docs/instructions/project-structure.md)
 

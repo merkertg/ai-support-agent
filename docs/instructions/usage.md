@@ -34,7 +34,7 @@ Roles form a ladder; each role can do everything the previous one can:
 | --- | --- |
 | `operator` | Read every `/api/*` resource; create customers, products, licenses, and tickets; draft previews; run the agent; search the knowledge base; change a ticket status. |
 | `reviewer` | Additionally approve or reject agent suggestions. |
-| `admin` | Additionally create employees with a role and issue, list, and revoke their tokens. |
+| `admin` | Additionally create employees with a role and issue, list, and revoke their tokens; erase a customer's personal data on request. |
 
 A lower role receives `403`. The author of a review decision is the employee who owns the token: the body has no `reviewer_id`, and sending one returns 422, so nobody can approve on behalf of a colleague. The role is read from PostgreSQL on every request and checked again under the review lock, so demoting or deactivating an employee takes effect on the next request.
 
@@ -276,5 +276,11 @@ In PowerShell on Windows ([equivalents](windows.md)):
 $auth = @{ Authorization = "Bearer $env:API_TOKEN" }
 Invoke-RestMethod -Headers $auth http://127.0.0.1:8001/api/dashboard
 ```
+
+## Erase a customer's personal data
+
+`POST /api/customers/{resource_id}/erase` with `{"confirm_email": "<current email>"}` anonymizes a customer on request. It needs `admin`, compares the email case-insensitively (a mismatch is 422), and is irreversible: name, email, and company are replaced, and the texts of every ticket, message, agent run, suggestion, and LangGraph thread of the customer are removed. Licenses, statuses, dates, and dashboard counts stay. A running analysis or a suggestion still waiting for a decision blocks the request with 409 until it is finished; afterwards the customer gets no new tickets or licenses (409) and its tickets cannot be reopened or analyzed (409). Customer and ticket responses show `erased_at`, `anonymized_at`, and `anonymized_reason`. The operator UI offers the same action to administrators under **Справочники → Клиенты**.
+
+Closed tickets older than a retention period are anonymized by `python -m app.privacy retention --older-than-days N`, which only prints a plan until `--apply` is added. Details, examples in Bash and PowerShell, and limits (backups, logs, a real LLM provider) are in [Персональные данные](privacy.md).
 
 To prepare a reproducible demonstration through these APIs, run `scripts/demo_scenario.py` with a token in `API_TOKEN` (`operator` for preparation, `reviewer` or `admin` for `--verify-review`); see the [Stage 10 guide](../STAGE_10.md).

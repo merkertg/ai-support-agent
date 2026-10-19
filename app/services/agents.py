@@ -32,6 +32,7 @@ from app.services.run_recovery import (
 ProviderFactory = Callable[[], AgentProvider]
 logger = get_logger("agent")
 TICKET_CLOSED = "Обращение закрыто: анализ недоступен"
+TICKET_ANONYMIZED = "Обращение обезличено: его тексты удалены, работа с ним завершена"
 
 
 class AgentRunFailure(Exception):
@@ -145,6 +146,8 @@ def ensure_analyzable(session: Session, ticket: Ticket) -> None:
     каждого доставило бы клиенту отдельный ответ. Окончательная проверка идёт
     под блокировкой строки обращения, поэтому параллельные запуски не обходят её.
     """
+    if ticket.anonymized_at is not None:
+        raise ResourceConflict(TICKET_ANONYMIZED)
     if ticket.status in CLOSED_TICKET_STATUSES:
         raise ResourceConflict(TICKET_CLOSED)
     pending = session.scalar(

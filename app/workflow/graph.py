@@ -21,7 +21,11 @@ Outcome = Literal["awaiting_review", "delivered", "rejected", "failed"]
 
 
 class ReviewState(TypedDict, total=False):
-    """Состояние в checkpoint: только id и итоги, без текста и ключа лицензии."""
+    """Состояние в checkpoint: id, итоги и решение сотрудника без ключа лицензии.
+
+    review содержит текст правки и комментарий решения, поэтому обезличивание
+    (app.services.privacy) удаляет поток целиком; итог восстанавливается по БД.
+    """
 
     ticket_id: int
     thread_id: str

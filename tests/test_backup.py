@@ -26,7 +26,7 @@ import pytest
 from scripts import backup
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "backup.py"
-HEAD = "0005_api_tokens"
+HEAD = "0006_privacy"
 NOW = datetime(2026, 10, 19, 5, 30, tzinfo=UTC)
 TABLES = {"alembic_version": 1, "customers": 3, "tickets": 5, "api_tokens": 2}
 POINTS = [
@@ -303,7 +303,7 @@ def test_revision_chain_reads_project_migrations_in_order() -> None:
     chain = backup.revision_chain()
     assert chain[0] == "0001_stage02_schema"
     assert chain[-1] == HEAD
-    assert len(chain) == len(set(chain)) == 5
+    assert len(chain) == len(set(chain)) == 6
 
 
 def write_migration(folder: Path, revision: str, parent: object) -> None:
@@ -590,7 +590,7 @@ def test_restore_refuses_non_empty_target_without_force(
     with pytest.raises(backup.BackupError) as error:
         backup.restore_backup(path, target(qdrant))
     message = str(error.value)
-    assert "PostgreSQL ai_support: 4 таблиц, 15 строк, Alembic 0005" in message
+    assert f"PostgreSQL ai_support: 4 таблиц, 15 строк, Alembic {HEAD}" in message
     assert "Qdrant support_knowledge: 2 точек" in message and "--force" in message
     assert docker.databases["ai_support"]["tables"]["tickets"] == 9
     assert not any("pg_restore" in call for call in docker.calls)
@@ -618,7 +618,7 @@ def test_restore_checks_alembic_revision_before_changes(
     clear_target(docker, qdrant)
     goal = target(qdrant)
     calls = len(docker.calls)
-    with pytest.raises(backup.BackupError, match="0099_future.*head 0005"):
+    with pytest.raises(backup.BackupError, match=f"0099_future.*head {HEAD}"):
         backup.restore_backup(path, goal, force=True)
     assert len(docker.calls) == calls
 

@@ -193,6 +193,27 @@ class FakeAPI:
         self.records["tickets"][ticket_id]["status"] = status
         return deepcopy(self.records["tickets"][ticket_id])
 
+    def erase_customer(self, customer_id, confirm_email):
+        """Обезличить учебного клиента и вернуть счётчики, как API."""
+        self.posts.append(("erase", customer_id, confirm_email))
+        customer = self.records["customers"][customer_id]
+        customer.update(
+            name="Клиент удалён",
+            email=f"erased-{customer_id}@erased.invalid",
+            company=None,
+            erased_at=STAMP,
+        )
+        return {
+            "customer_id": customer_id,
+            "erased_at": STAMP,
+            "tickets": 1,
+            "messages": 0,
+            "agent_runs": 0,
+            "suggestions": 0,
+            "workflow_threads": 0,
+            "licenses_kept": 0,
+        }
+
     def review(self, suggestion_id, payload):
         """Применить решение к тестовой очереди и вернуть сохранённое состояние."""
         self.posts.append(("review", suggestion_id, deepcopy(payload)))
@@ -892,3 +913,55 @@ def test_admin_chooses_role_of_new_staff(desktop):
             {"name": "Анна", "email": "anna@example.org", "role": "reviewer"},
         )
     ]
+
+
+def open_customer_erasure(screen):
+    """Открыть справочник клиентов, где администратор видит форму обезличивания."""
+    navigate(screen, "Справочники")
+    find(screen.selectbox, "Справочник").set_value("Клиенты").run()
+    assert not screen.exception
+
+
+def test_admin_erases_customer_only_after_confirmation(desktop):
+    """Без флажка запрос не уходит; с флажком UI передаёт id и email."""
+    screen, api = desktop
+    open_customer_erasure(screen)
+    find(screen.text_input, "ID клиента для обезличивания").set_value("1")
+    find(screen.text_input, "Текущий email клиента для подтверждения").set_value(
+        "demo@example.org"
+    )
+    find(screen.button, "Обезличить клиента").click().run()
+    assert not screen.exception
+    assert api.posts == []
+    assert any("необратимо" in item.value for item in screen.error)
+    find(screen.checkbox, "Понимаю, что восстановить данные нельзя").check()
+    find(screen.button, "Обезличить клиента").click().run()
+    assert not screen.exception
+    assert api.posts == [("erase", 1, "demo@example.org")]
+    assert any("Клиент №1 обезличен" in item.value for item in screen.success)
+    assert "demo@example.org" not in str([item.value for item in screen.success])
+
+
+def test_operator_cannot_see_customer_erasure(desktop):
+    """Форма обезличивания скрыта для ролей ниже администратора."""
+    screen, api = desktop
+    api.role = "operator"
+    open_customer_erasure(screen)
+    assert not [b for b in screen.button if b.label == "Обезличить клиента"]
+    assert any("администратор" in item.value for item in screen.caption)
+    assert api.posts == []
+
+
+def test_anonymized_ticket_hides_status_and_analysis(desktop):
+    """Обезличенное обращение показывает причину и не предлагает изменений."""
+    screen, api = desktop
+    api.records["tickets"][1].update(
+        status="closed",
+        anonymized_at=STAMP,
+        anonymized_reason="retention",
+    )
+    open_ticket(screen)
+    assert any("по сроку хранения" in item.value for item in screen.info)
+    assert not [b for b in screen.button if b.label == "Изменить статус"]
+    assert find(screen.button, "Запустить анализ").disabled
+    assert not any("смените статус" in item.value for item in screen.info)

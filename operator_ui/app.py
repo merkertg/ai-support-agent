@@ -27,6 +27,11 @@ PRIORITIES = {
     "Критический": "critical",
 }
 ROLES = {"Оператор": "operator", "Рецензент": "reviewer", "Администратор": "admin"}
+# Почему у обращения удалены тексты (поле anonymized_reason API).
+ANONYMIZATION_REASONS = {
+    "customer_request": "по запросу клиента",
+    "retention": "по сроку хранения",
+}
 ROLE_NAMES = {value: label for label, value in ROLES.items()}
 # Решение по предложению агента принимают рецензент и администратор.
 REVIEW_ROLES = {"reviewer", "admin"}
@@ -219,6 +224,43 @@ def create_ticket(client: APIClient) -> None:
             st.success(f"Создано обращение №{ticket['id']}.")
 
 
+def erase_customer_form(client: APIClient, staff: dict) -> None:
+    """Обезличить клиента по его запросу: только администратор и с подтверждением.
+
+    Сервер требует текущий email клиента; флажок защищает от случайного нажатия.
+    После успеха показываются только счётчики — данные клиента уже удалены.
+    """
+    if staff["role"] != "admin":
+        st.caption("Обезличить клиента по его запросу может администратор.")
+        return
+    with st.expander("Обезличить клиента по запросу"):
+        st.warning(
+            "Действие необратимо: имя, email, компания и тексты всех обращений "
+            "клиента, решений и запусков агента будут удалены. Лицензии и "
+            "статистика сохранятся. Резервные копии, сделанные раньше, данные "
+            "по-прежнему содержат."
+        )
+        with st.form("erase_customer"):
+            customer_id = id_input("ID клиента для обезличивания", key="erase_id")
+            confirm_email = st.text_input(
+                "Текущий email клиента для подтверждения", max_chars=320
+            )
+            understood = st.checkbox("Понимаю, что восстановить данные нельзя")
+            submitted = st.form_submit_button("Обезличить клиента")
+        if not submitted:
+            return
+        if not understood or not confirm_email.strip():
+            st.error("Введите email клиента и подтвердите, что действие необратимо.")
+            return
+        report = client.erase_customer(customer_id, confirm_email.strip())
+        st.success(
+            f"Клиент №{report['customer_id']} обезличен. Обращений: "
+            f"{report['tickets']}, сообщений: {report['messages']}, запусков: "
+            f"{report['agent_runs']}, предложений: {report['suggestions']}. "
+            f"Лицензий сохранено: {report['licenses_kept']}."
+        )
+
+
 def ticket_card(client: APIClient, ticket_id: int, llm: dict, knowledge: dict) -> None:
     """Объединить данные карточки и историю, загружая только нужные страницы."""
     ticket = client.get_record("tickets", ticket_id)
@@ -226,15 +268,27 @@ def ticket_card(client: APIClient, ticket_id: int, llm: dict, knowledge: dict) -
     st.text(ticket["subject"])
     st.caption(f"Статус: {ticket['status']} · приоритет: {ticket['priority']}")
     st.text(ticket["description"])
-    with st.form(f"ticket_status_{ticket_id}"):
-        statuses = {label: value for label, value in TICKET_STATUSES.items() if value}
-        current = list(statuses.values()).index(ticket["status"])
-        selected_status = st.selectbox("Новый статус", list(statuses), index=current)
-        update_status = st.form_submit_button("Изменить статус")
-    if update_status:
-        client.update_ticket_status(ticket_id, statuses[selected_status])
-        st.session_state["ticket_notice"] = "Статус обращения изменён."
-        st.rerun()
+    anonymized = ticket.get("anonymized_at") is not None
+    if anonymized:
+        reason = ANONYMIZATION_REASONS.get(ticket.get("anonymized_reason"), "")
+        st.info(
+            f"Обращение обезличено {reason}: тексты удалены. Статус и анализ "
+            "больше не меняются; история запусков осталась без текстов."
+        )
+    else:
+        with st.form(f"ticket_status_{ticket_id}"):
+            statuses = {
+                label: value for label, value in TICKET_STATUSES.items() if value
+            }
+            current = list(statuses.values()).index(ticket["status"])
+            selected_status = st.selectbox(
+                "Новый статус", list(statuses), index=current
+            )
+            update_status = st.form_submit_button("Изменить статус")
+        if update_status:
+            client.update_ticket_status(ticket_id, statuses[selected_status])
+            st.session_state["ticket_notice"] = "Статус обращения изменён."
+            st.rerun()
     if notice := st.session_state.pop("ticket_notice", None):
         st.success(notice)
     with st.expander("Клиент, продукт и лицензии"):
@@ -266,8 +320,8 @@ def ticket_card(client: APIClient, ticket_id: int, llm: dict, knowledge: dict) -
         key=f"analyze_confirm_{ticket_id}",
         purpose="Модель или поиск базы знаний при анализе",
     )
-    closed = ticket["status"] in CLOSED_STATUSES
-    if closed:
+    closed = ticket["status"] in CLOSED_STATUSES or anonymized
+    if closed and not anonymized:
         st.info(
             "Обращение закрыто: новый анализ недоступен. Чтобы проанализировать "
             "его снова, сначала смените статус."
@@ -526,6 +580,8 @@ def catalog_page(client: APIClient, staff: dict) -> None:
         rows = [{**item, "license_key": "••••••••"} for item in rows]
     st.dataframe(rows, hide_index=True, width="stretch")
     pagination("catalog", offset, len(rows))
+    if resource == "customers":
+        erase_customer_form(client, staff)
     if resource == "users" and staff["role"] != "admin":
         st.info("Создавать сотрудников и выдавать им токены может администратор.")
         return

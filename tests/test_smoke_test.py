@@ -406,6 +406,7 @@ def run_smoke(
     check_review: bool = False,
     review_run: int | None = None,
     token: str | None = TOKEN,
+    check_privacy: bool = False,
 ) -> subprocess.CompletedProcess:
     """Вызвать CLI отдельным процессом с ограничением времени самого теста.
 
@@ -428,6 +429,8 @@ def run_smoke(
         command.append("--check-review")
     if review_run is not None:
         command.extend(["--review-run", str(review_run)])
+    if check_privacy:
+        command.append("--check-privacy")
     environment = {key: value for key, value in os.environ.items()}
     environment.pop("API_TOKEN", None)
     # Локальный HTTP-сервер теста доступен напрямую при любых настройках прокси.
@@ -1122,3 +1125,160 @@ def test_cli_rejects_broken_review_authorization(defect: str, message: str) -> N
     assert message in result.stderr
     # Проверка ролей идёт до решения от имени сотрудника API_TOKEN.
     assert "одобрено от имени" not in result.stdout
+
+
+ERASED = "[удалено]"
+
+
+def privacy_responses(*, leak: str | None = None, report: dict | None = None) -> dict:
+    """Сценарий --check-privacy: API запоминает маркер из email нового клиента.
+
+    leak называет чтение, которое по ошибке вернёт маркер после обезличивания;
+    report заменяет поля отчёта POST /erase.
+    """
+    responses = valid_responses(check_api=True)
+    state = {"marker": "", "tickets": 0, "erasures": 0}
+    paths = json.loads(responses["/openapi.json"][1])["paths"]
+    paths.update(
+        {
+            "/api/llm/status": {"get": {}},
+            "/api/tickets/{resource_id}/draft": {"post": {}},
+            "/api/tickets/{resource_id}/analyze": {"post": {}},
+            "/api/tickets/{resource_id}/messages": {"get": {}},
+            "/api/customers/{resource_id}/erase": {"post": {}},
+            "/api/agent-runs/{resource_id}/workflow": {"get": {}},
+            "/api/suggestions/{resource_id}/review": {"post": {}},
+        }
+    )
+    responses["/openapi.json"] = (
+        200,
+        json.dumps({"info": {"title": "AI Support Agent"}, "paths": paths}).encode(),
+    )
+
+    def customer(body: dict) -> tuple[int, bytes]:
+        """Создать клиента и запомнить маркер из его email."""
+        state["marker"] = body["email"].split("@")[0]
+        return 201, b'{"id":51}'
+
+    def ticket(body: dict) -> tuple[int, bytes]:
+        """Первое обращение создаётся; после обезличивания — 409."""
+        state["tickets"] += 1
+        return (201, b'{"id":53}') if state["tickets"] == 1 else (409, b"{}")
+
+    def erase(body: dict) -> tuple[int, bytes]:
+        """Первое обезличивание даёт отчёт; повтор — 409."""
+        state["erasures"] += 1
+        if state["erasures"] > 1:
+            return 409, b'{"detail":"already"}'
+        assert body == {"confirm_email": f"{state['marker']}@example.com"}
+        value = {
+            "customer_id": 51,
+            "erased_at": "2026-10-19T00:00:00Z",
+            "tickets": 1,
+            "messages": 1,
+            "agent_runs": 1,
+            "suggestions": 1,
+            "workflow_threads": 1,
+            "licenses_kept": 0,
+        } | (report or {})
+        return 200, json.dumps(value).encode()
+
+    def read(name: str, value: dict | list):
+        """Ответ чтения; для leak добавляет маркер клиента в тело."""
+
+        def answer(body: dict) -> tuple[int, bytes]:
+            """Выдать JSON после обезличивания."""
+            data = value
+            if leak == name:
+                extra = {"note": state["marker"]}
+                data = [*value, extra] if isinstance(value, list) else value | extra
+            return 200, json.dumps(data, ensure_ascii=False).encode()
+
+        return answer
+
+    run = {"id": 61, "ticket_id": 53, "suggestion": {"id": 71, "status": "pending"}}
+    responses.update(
+        {
+            "/api/llm/status": (
+                200,
+                b'{"provider":"mock","model":"mock-draft-v1","configured":true}',
+            ),
+            "/api/customers": customer,
+            "/api/products": (201, b'{"id":52}'),
+            "/api/tickets": ticket,
+            "/api/tickets/53/analyze": (201, json.dumps(run).encode()),
+            "/api/suggestions/71/review": (200, b'{"suggestion":{"id":71}}'),
+            "/api/customers/51/erase": erase,
+            "/api/customers/51": read(
+                "customer", {"id": 51, "name": ERASED, "erased_at": "2026-10-19"}
+            ),
+            "/api/tickets/53": read(
+                "ticket",
+                {
+                    "id": 53,
+                    "status": "closed",
+                    "description": ERASED,
+                    "anonymized_reason": "customer_request",
+                },
+            ),
+            "/api/tickets/53/messages": read("messages", [{"content": ERASED}]),
+            "/api/agent-runs/61": read(
+                "run", {"id": 61, "result": {"summary": ERASED}}
+            ),
+            "/api/agent-runs/61/workflow": read("workflow", {"state": "delivered"}),
+        }
+    )
+    return responses
+
+
+def test_cli_checks_customer_erasure_end_to_end() -> None:
+    """Обезличивание проверено по отчёту, чтениям и двум отказам 409."""
+    with http_server(privacy_responses()) as (url, requests):
+        result = run_smoke(url, check_privacy=True)
+    assert result.returncode == 0, result.stderr
+    assert "OK privacy: клиент №51 обезличен" in result.stdout
+    marker = result.stdout.split("маркер ")[1].split()[0]
+    assert marker.startswith("privacy-") and len(marker) == len("privacy-") + 12
+    assert requests["/api/customers/51/erase"] == 2
+    assert requests["/api/tickets"] == 2
+
+
+@pytest.mark.parametrize("leak", ["customer", "ticket", "messages", "run", "workflow"])
+def test_cli_detects_personal_data_left_after_erasure(leak: str) -> None:
+    """Маркер клиента в любом чтении после обезличивания — ошибка."""
+    with http_server(privacy_responses(leak=leak)) as (url, _):
+        result = run_smoke(url, check_privacy=True)
+    assert result.returncode == 1
+    assert "содержит данные клиента" in result.stderr
+
+
+def test_cli_rejects_wrong_erasure_report() -> None:
+    """Отчёт с другим числом обращений не принимается."""
+    with http_server(privacy_responses(report={"tickets": 2})) as (url, _):
+        result = run_smoke(url, check_privacy=True)
+    assert result.returncode == 1
+    assert "неверный отчёт обезличивания" in result.stderr
+
+
+def test_cli_privacy_check_requires_admin_before_writes() -> None:
+    """Токен не администратора останавливает проверку до создания клиента."""
+    responses = privacy_responses()
+    responses["/api/auth/me"] = (200, json.dumps(ME | {"role": "reviewer"}).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_privacy=True)
+    assert result.returncode == 1
+    assert "роли admin" in result.stderr
+    assert requests["/api/customers"] == 0
+
+
+def test_cli_privacy_check_refuses_real_provider_before_writes() -> None:
+    """С реальным провайдером проверка не создаёт записей и не вызывает модель."""
+    responses = privacy_responses()
+    responses["/api/llm/status"] = (
+        200,
+        b'{"provider":"openai","model":"gpt","configured":true}',
+    )
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_privacy=True)
+    assert result.returncode == 1
+    assert requests["/api/customers"] == 0

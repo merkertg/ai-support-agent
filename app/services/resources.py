@@ -62,9 +62,28 @@ def _get[Entity: (Customer, Product, License, Ticket, User)](
     return entity
 
 
+CUSTOMER_ERASED = "Клиент обезличен: новые обращения и лицензии для него не создаются"
+
+
 def _require_references(session: Session, customer_id: int, product_id: int) -> None:
-    """Проверить внешние ключи до вставки и назвать отсутствующую сущность."""
-    get_customer(session, customer_id)
+    """Проверить внешние ключи до вставки и назвать отсутствующую сущность.
+
+    FOR SHARE удерживает клиента до commit вставки: обезличивание (FOR UPDATE)
+    либо дождётся новой записи и обезличит её, либо завершится раньше, и тогда
+    здесь будет видна отметка erased_at.
+    """
+    customer = session.scalar(
+        select(Customer)
+        .where(Customer.id == customer_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if customer is None:
+        session.rollback()
+        raise ResourceNotFound("Клиент не найден")
+    if customer.erased_at is not None:
+        session.rollback()
+        raise ResourceConflict(CUSTOMER_ERASED)
     get_product(session, product_id)
 
 

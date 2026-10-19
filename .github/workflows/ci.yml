@@ -720,6 +720,37 @@ jobs:
           cmp demo.json demo-restored.json
           python3 scripts/smoke_test.py --base-url "$api" --timeout 30 --check-review
 
+      # Обезличивание на собранном образе: smoke создаёт клиента с уникальным
+      # маркером, проходит mock-анализ и одобрение, обезличивает клиента и
+      # проверяет ответы API. Затем маркер ищется в каждой таблице PostgreSQL
+      # проекта CI, включая checkpoint LangGraph: он не должен найтись нигде.
+      # bytea в тексте строки выглядит как hex, поэтому ищется и hex маркера.
+      - name: Erase a customer and search every table for personal data
+        run: |
+          python3 scripts/smoke_test.py --base-url "http://127.0.0.1:${API_PORT}" \
+            --timeout 60 --check-privacy | tee privacy.log
+          marker="$(grep -o -m 1 'privacy-[0-9a-f]\{12\}' privacy.log)"
+          test -n "$marker"
+          found="$(docker compose --project-name ai-support-ci exec -T db sh -c \
+            'psql -X -q -A -t -v ON_ERROR_STOP=1 -v marker="$1" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+            sh "$marker" <<'SQL'
+          SELECT t.table_name
+          FROM information_schema.tables AS t
+          WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+            AND (xpath('/row/c/text()', query_to_xml(format(
+              'SELECT count(*) AS c FROM %I AS r '
+              'WHERE strpos(r::text, %L) > 0 OR strpos(r::text, %L) > 0',
+              t.table_name, :'marker',
+              encode(convert_to(:'marker', 'UTF8'), 'hex')),
+              false, true, '')))[1]::text::int > 0;
+          SQL
+          )"
+          if [ -n "$found" ]; then
+            echo "Маркер клиента остался в таблицах: $found" >&2
+            exit 1
+          fi
+          echo "OK privacy: маркер клиента не найден ни в одной таблице PostgreSQL"
+
       # Один архив содержит именно проверенные API/UI для amd64 и arm64 и их ID.
       # Для релизного тега используются те же gates, что и для main.
       - name: Export tested API and UI images

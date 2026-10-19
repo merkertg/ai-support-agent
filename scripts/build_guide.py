@@ -2987,6 +2987,11 @@ def append_audit_pages(story, verification):
                     "JSON с X-Request-ID; без query string, SQL, тел запросов и ключей",
                 ),
                 (
+                    "Персональные данные",
+                    "admin обезличивает клиента по email; срок хранения закрытых "
+                    "обращений — app.privacy retention",
+                ),
+                (
                     "Публикация API/UI",
                     "main: sha-<полный SHA> для amd64 и arm64; "
                     "latest только для вершины",
