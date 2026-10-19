@@ -332,7 +332,9 @@ def agent_run() -> dict:
 
 
 @contextmanager
-def http_server(responses: dict[str, tuple[int, bytes]]):
+def http_server(
+    responses: dict[str, tuple[int, bytes]], *, response_delay: float = 0.0
+):
     """Запустить изолированный HTTP-сервер и гарантированно закрыть его.
 
     Маршруты /api/* требуют известный токен, как настоящее API: без него 401,
@@ -348,6 +350,9 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
         def respond(self, payload: dict | None = None) -> None:
             """Выдать ответ сценария; функция-ответ получает JSON тела POST."""
             requests[self.path] += 1
+            # Задержка нужна только для проверки суммарного времени сценария.
+            if response_delay:
+                time.sleep(response_delay)
             value = responses.get(self.path, (404, b"Not found"))
             if self.path.startswith("/api/") and self.path not in open_paths:
                 header = self.headers.get("Authorization", "")
@@ -392,7 +397,7 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
 
 def run_smoke(
     url: str,
-    timeout: str = "2",
+    timeout: str = "15",
     check_database: bool = False,
     check_api: bool = False,
     check_llm: bool = False,
@@ -405,6 +410,8 @@ def run_smoke(
     """Вызвать CLI отдельным процессом с ограничением времени самого теста.
 
     Токен передаётся только через окружение API_TOKEN, как в CI.
+    Обычный сценарий получает 15 с на все HTTP-запросы: 2 с не хватало
+    для длинных проверок на Windows. Тесты дедлайна задают короткий бюджет явно.
     """
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
     if check_database:
@@ -423,6 +430,9 @@ def run_smoke(
         command.extend(["--review-run", str(review_run)])
     environment = {key: value for key, value in os.environ.items()}
     environment.pop("API_TOKEN", None)
+    # Локальный HTTP-сервер теста доступен напрямую при любых настройках прокси.
+    for name in ("NO_PROXY", "no_proxy"):
+        environment[name] = "127.0.0.1,localhost,::1"
     if token is not None:
         environment["API_TOKEN"] = token
     # Дочерний CLI печатает UTF-8 на любой ОС; Windows по умолчанию читал бы cp1252.
@@ -431,7 +441,8 @@ def run_smoke(
         capture_output=True,
         encoding="utf-8",
         check=False,
-        timeout=5,
+        # Отдельный watchdog включает запуск Python и оставляет запас на CI.
+        timeout=30,
         env=environment,
     )
     # Ни один режим не печатает токены сотрудников.
@@ -443,6 +454,15 @@ def run_smoke(
 def test_cli_accepts_working_api() -> None:
     """Успех требует доступности всех трёх маршрутов через настоящий HTTP."""
     with http_server(valid_responses()) as (url, requests):
+        result = run_smoke(url)
+    assert result.returncode == 0, result.stderr
+    assert requests == Counter({"/health": 1, "/docs": 1, "/openapi.json": 1})
+    assert "Smoke test пройден" in result.stdout
+
+
+def test_cli_allows_multiple_responses_within_scenario_budget() -> None:
+    """Три ответа по 0.8 с укладываются в бюджет сценария длиннее двух секунд."""
+    with http_server(valid_responses(), response_delay=0.8) as (url, requests):
         result = run_smoke(url)
     assert result.returncode == 0, result.stderr
     assert requests == Counter({"/health": 1, "/docs": 1, "/openapi.json": 1})

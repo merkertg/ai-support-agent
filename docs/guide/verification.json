@@ -11,7 +11,7 @@
   "checks": [
     {
       "name": "Код и комментарии",
-      "result": "Ruff без замечаний; 131 файл Python, 1569 функций/классов с docstrings."
+      "result": "Ruff без замечаний; 131 файл Python, 1570 функций/классов с docstrings."
     },
     {
       "name": "Инструкции",
@@ -23,7 +23,7 @@
     },
     {
       "name": "CI и платформы",
-      "result": "3 workflow: actionlint PASS. 6 jobs CI, portability Linux/macOS/Windows; удалённый запуск не подтверждён."
+      "result": "После исправления Windows: 1034 unit PASS, включая 103 smoke CLI. Новый результат матрицы Linux/macOS/Windows ожидается."
     },
     {
       "name": "Токены и роли",
@@ -59,20 +59,21 @@
     }
   ],
   "remote_ci": {
-    "status": "not_verified",
-    "commit": null,
+    "status": "failed",
+    "commit": "6fbe9a6763f3023b43f2615f2a09782454e18ccd",
     "previous_user_confirmed_commit": "571538c9852133a8f5288565a86cca9393cce1fb",
-    "detail": "Новый удалённый запуск не подтверждён: API закрытого репозитория вернул 404. Пользователь ранее сообщил о 5 зелёных jobs/API+UI для 571538c; в истории также есть его раннее падение покрытия. Для нового SHA проверь 6 jobs и 3 ОС portability, оба пакета amd64/arm64. Подпись выключена."
+    "detail": "Журнал CI №23 для 6fbe9a6: Windows — 19 failed / 1014 passed, общий тестовый дедлайн 2 с. Исправление: 15 с и watchdog 30 с; локально 1034 unit PASS. Полный прогон 1186 и 92.23% выше предшествует исправлению. Для нового SHA нужны все 8 выполнений, GHCR и SBOM. Подпись выключена."
   },
   "changes": [
     "Завершены токены сотрудников, роли и лимит изменений; автор решения берётся из проверенного токена.",
     "FOR SHARE защищает решение от одновременного понижения роли; CLI нормализует email.",
     "Очистка GHCR сохраняет все нужные связи, останавливается при 404 и повторно проверяет версии перед удалением.",
     "Четыре архитектурных образа, SBOM и полный аутентифицированный Docker-сценарий проверены.",
-    "Публичная подпись выключена по выбору пользователя; стенд обновлён, одобренный локальный администратор создан."
+    "Публичная подпись выключена по выбору пользователя; стенд обновлён, одобренный локальный администратор создан.",
+    "Исправлен дедлайн Windows smoke-тестов; добавлен медленный HTTP-сценарий, короткий тайм-аут проверяется отдельно."
   ],
   "remaining": [
-    "Подтвердить новый GitHub Actions: 6 jobs, 3 ОС portability, оба пакета amd64/arm64 и SBOM; первый dry-run очистки и PR зависимостей.",
+    "Подтвердить новый GitHub Actions после сбоя Windows 6fbe9a6: 8 выполнений, оба пакета amd64/arm64 и SBOM; затем первый dry-run очистки и PR зависимостей.",
     "SSO, общий лимит нескольких worker и внешний TLS остаются отдельным расширением; локальный вход администратора уже подготовлен.",
     "Публичная подпись выключена; GHCR_PUBLIC_SIGNING=true включает её и раскрытие metadata в Rekor.",
     "Mock остаётся по выбору пользователя. Реальная модель, внешняя доставка и серверный deploy не проверялись и не настроены."
@@ -103,5 +104,18 @@
     "credential_file": ".env.admin-token",
     "credential_tracked": false,
     "ui_authenticated": true
+  },
+  "follow_up": {
+    "checked_at": "2026-10-19",
+    "base_commit": "6fbe9a6",
+    "scope": "portability unit suite; integrations excluded",
+    "unit_passed": 1034,
+    "smoke_cli": 103,
+    "skipped": 0,
+    "seconds": 67.02,
+    "scenario_timeout_seconds": 15,
+    "process_timeout_seconds": 30,
+    "production_timeouts_changed": false,
+    "previous_full_run_retained": true
   }
 }
