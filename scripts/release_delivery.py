@@ -1,8 +1,11 @@
-"""Передать проверенные API/UI образы в GHCR без повторной сборки.
+"""Передать проверенные API/UI образы amd64 и arm64 в GHCR без повторной сборки.
 
-Версионные ссылки проверяются до первой записи в registry: чужую версию
-не перезаписываем, повтор идентичного образа разрешаем. Секреты читаются
-только из окружения; команды Docker получают отдельные аргументы без shell.
+Каждая архитектура публикуется отдельным тегом `<тег>-amd64` и `<тег>-arm64`,
+а общий тег (`sha-…`, `latest`, `vX.Y.Z`) — это image index обеих архитектур:
+`docker pull` выбирает нужную сам. Версионные ссылки проверяются до первой
+записи в registry: чужую версию не перезаписываем, повтор идентичного образа
+разрешаем. Секреты читаются только из окружения; команды Docker получают
+отдельные аргументы без shell.
 """
 
 import argparse
@@ -18,7 +21,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-LOCAL_IMAGES = ("ai-support-agent:ci", "ai-support-agent-ui:ci")
+PLATFORMS = ("amd64", "arm64")
+# Проверенные в CI образы: компонент → архитектура → локальное имя.
+COMPONENTS = {
+    "api": {"amd64": "ai-support-agent:ci", "arm64": "ai-support-agent:ci-arm64"},
+    "ui": {"amd64": "ai-support-agent-ui:ci", "arm64": "ai-support-agent-ui:ci-arm64"},
+}
+LOCAL_IMAGES = tuple(
+    COMPONENTS[component][arch] for arch in PLATFORMS for component in COMPONENTS
+)
+ARCHITECTURE = {
+    COMPONENTS[component][arch]: arch for component in COMPONENTS for arch in PLATFORMS
+}
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -96,9 +110,26 @@ def local_id(image: str) -> str:
     return value
 
 
+def local_platform(image: str) -> str:
+    """Прочитать ОС и архитектуру локального образа, например linux/arm64."""
+    return command(
+        "docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image
+    )
+
+
+def require_platforms() -> None:
+    """Убедиться, что под каждым именем лежит образ своей архитектуры."""
+    for image in LOCAL_IMAGES:
+        if local_platform(image) != f"linux/{ARCHITECTURE[image]}":
+            raise DeliveryError(
+                f"Образ {image} собран не для linux/{ARCHITECTURE[image]}"
+            )
+
+
 def export_images(directory: Path, commit: str) -> None:
-    """Сохранить два протестированных образа и их ID одним набором артефактов."""
+    """Сохранить четыре протестированных образа и их ID одним набором артефактов."""
     require_commit(commit)
+    require_platforms()
     directory.mkdir(parents=True, exist_ok=True)
     metadata = {
         "commit": commit,
@@ -117,7 +148,7 @@ def export_images(directory: Path, commit: str) -> None:
 
 
 def verify_images(directory: Path, commit: str) -> dict[str, str]:
-    """Загрузить архив и сверить commit и оба image ID до публикации."""
+    """Загрузить архив и сверить commit, четыре image ID и их платформы."""
     require_commit(commit)
     metadata = json.loads(
         (directory / "tested-images.json").read_text(encoding="utf-8")
@@ -140,6 +171,7 @@ def verify_images(directory: Path, commit: str) -> dict[str, str]:
     command("docker", "load", "--input", str(directory / "tested-images.tar"))
     if any(local_id(image) != images[image] for image in LOCAL_IMAGES):
         raise DeliveryError("Загруженный образ не совпадает с проверенным image ID")
+    require_platforms()
     return images
 
 
@@ -191,8 +223,30 @@ def manifest_identity(data: object, body: bytes, headers) -> tuple[str, str]:
     return config, digest
 
 
+def index_platforms(data: object) -> dict[str, str]:
+    """Вернуть digest manifest для linux/amd64 и linux/arm64 из image index.
+
+    Attestation-manifest (платформа unknown) пропускаются. Другие платформы
+    или повтор архитектуры означают не тот index, который мы публикуем.
+    """
+    if not isinstance(data, dict) or data.get("mediaType") not in INDEX_TYPES:
+        raise DeliveryError("Ожидался image index обеих архитектур")
+    found: dict[str, str] = {}
+    for item in data.get("manifests") or []:
+        platform = item.get("platform") if isinstance(item, dict) else None
+        if not isinstance(platform, dict) or platform.get("os") == "unknown":
+            continue
+        arch = platform.get("architecture")
+        if platform.get("os") != "linux" or arch not in PLATFORMS or arch in found:
+            raise DeliveryError("Image index содержит неожиданную платформу")
+        found[arch] = item["digest"]
+    return found
+
+
 class Registry:
     """Проверять manifest GHCR с явной авторизацией и без записи токена в лог."""
+
+    host = "ghcr.io"
 
     def __init__(self, actor: str, token: str) -> None:
         """Создать HTTPS-клиент; отсутствие credentials блокирует публикацию."""
@@ -230,6 +284,13 @@ class Registry:
 
     def inspect(self, repository: str, tag: str) -> tuple[str, str] | None:
         """Вернуть config/index ID и manifest digest либо отсутствие тега по 404."""
+        response = self.fetch(repository, tag)
+        if response is None:
+            return None
+        return manifest_identity(*response)
+
+    def fetch(self, repository: str, reference: str):
+        """Прочитать manifest или index по тегу либо digest; None — только 404."""
         if repository not in self.tokens:
             query = urlencode(
                 {"service": "ghcr.io", "scope": f"repository:{repository}:pull,push"}
@@ -242,14 +303,62 @@ class Registry:
             if not isinstance(token, str) or not token:
                 raise DeliveryError("GHCR не выдал токен доступа к пакету")
             self.tokens[repository] = token
-        response = self.request(
-            f"https://ghcr.io/v2/{repository}/manifests/{tag}",
+        return self.request(
+            f"https://ghcr.io/v2/{repository}/manifests/{reference}",
             f"Bearer {self.tokens[repository]}",
             manifest=True,
         )
+
+
+def platform_children(registry, remote: str, digests: dict[str, str]) -> dict:
+    """Определить, какие manifest каждой архитектуры попадут в общий index.
+
+    Classic Docker публикует одиночный manifest. Хранилище containerd может
+    опубликовать index с attestation: тогда берётся его manifest нужной ОС.
+    """
+    children = {}
+    for arch, digest in digests.items():
+        response = registry.fetch(remote, digest)
         if response is None:
-            return None
-        return manifest_identity(*response)
+            raise DeliveryError(f"Опубликованный {remote}@{digest} не найден")
+        data = response[0]
+        if isinstance(data, dict) and data.get("mediaType") in INDEX_TYPES:
+            nested = index_platforms(data)
+            if set(nested) != {arch}:
+                raise DeliveryError(f"{remote}@{digest} содержит не только {arch}")
+            children[arch] = nested[arch]
+        else:
+            children[arch] = digest
+    return children
+
+
+def verified_index(
+    registry, remote: str, tag: str, children: dict, *, replace: bool = False
+) -> str | None:
+    """Вернуть digest общего тега, если это index ровно с этими manifest.
+
+    С replace=True другой index или прежний одиночный manifest означают
+    «нужно записать заново»: так ведёт себя SHA-тег main при повторной
+    сборке того же commit. Ошибки сети и целостности ответа остаются ошибками.
+    """
+    response = registry.fetch(remote, tag)
+    if response is None:
+        return None
+    data, body, headers = response
+    digest = manifest_identity(data, body, headers)[1]
+    try:
+        matches = index_platforms(data) == children
+    except DeliveryError:
+        if not replace:
+            raise
+        matches = False
+    if matches:
+        return digest
+    if replace:
+        return None
+    raise DeliveryError(
+        f"ghcr.io/{remote}:{tag} не совпадает с проверенными amd64 и arm64"
+    )
 
 
 def publish_images(
@@ -260,8 +369,8 @@ def publish_images(
     *,
     version: str = "",
     main_sha: str = "",
-) -> list[dict[str, str]]:
-    """Проверить обе ссылки и опубликовать только проверенные API/UI образы."""
+) -> list[dict]:
+    """Проверить ссылки и опубликовать проверенные API/UI для amd64 и arm64."""
     require_commit(commit)
     repository = repository.lower()
     if not REPOSITORY.fullmatch(repository) or len(repository) > 250:
@@ -270,60 +379,115 @@ def publish_images(
         require_version(version)
     elif main_sha:
         require_commit(main_sha)
-    targets = [(LOCAL_IMAGES[0], repository), (LOCAL_IMAGES[1], repository + "-ui")]
+    host = registry.host
+    targets = {"api": repository, "ui": repository + "-ui"}
     tag = version or f"sha-{commit}"
-    # Проверяем оба version-тега заранее: конфликт UI не должен менять API.
-    existing = {}
+    # Версия проверяется целиком до первой записи: конфликт UI не должен
+    # менять API, а занятый тег архитектуры — общий index.
+    existing: dict[str, dict] = {}
     if version:
-        for image, remote in targets:
-            found = registry.inspect(remote, tag)
-            if found and images[image] not in found:
-                raise DeliveryError(
-                    f"Версия ghcr.io/{remote}:{tag} уже занята другим образом"
+        for component, remote in targets.items():
+            found = {}
+            for arch in PLATFORMS:
+                image = COMPONENTS[component][arch]
+                found[arch] = registry.inspect(remote, f"{tag}-{arch}")
+                if found[arch] and images[image] not in found[arch]:
+                    raise DeliveryError(
+                        f"Версия ghcr.io/{remote}:{tag}-{arch} "
+                        "уже занята другим образом"
+                    )
+            if registry.fetch(remote, tag) is not None:
+                if not all(found.values()):
+                    raise DeliveryError(
+                        f"Версия ghcr.io/{remote}:{tag} уже занята другим образом"
+                    )
+                children = platform_children(
+                    registry, remote, {arch: found[arch][1] for arch in PLATFORMS}
                 )
+                try:
+                    verified_index(registry, remote, tag, children)
+                except DeliveryError:
+                    raise DeliveryError(
+                        f"Версия ghcr.io/{remote}:{tag} уже занята другим образом"
+                    ) from None
             existing[remote] = found
     report = []
-    for image, remote in targets:
-        reference = f"ghcr.io/{remote}:{tag}"
-        found = existing.get(remote)
-        if not found:
-            command("docker", "tag", image, reference)
-            command("docker", "push", reference)
-            found = registry.inspect(remote, tag)
-        if not found or images[image] not in found:
-            raise DeliveryError(
-                f"Опубликованный {reference} не совпадает с tested image ID"
+    for component, remote in targets.items():
+        digests = {}
+        for arch in PLATFORMS:
+            image = COMPONENTS[component][arch]
+            arch_tag = f"{tag}-{arch}"
+            found = existing.get(remote, {}).get(arch)
+            if not found:
+                reference = f"{host}/{remote}:{arch_tag}"
+                command("docker", "tag", image, reference)
+                command("docker", "push", reference)
+                found = registry.inspect(remote, arch_tag)
+            if not found or images[image] not in found:
+                raise DeliveryError(
+                    f"Опубликованный {host}/{remote}:{arch_tag} "
+                    "не совпадает с tested image ID"
+                )
+            digests[arch] = found[1]
+        children = platform_children(registry, remote, digests)
+        sources = [f"{host}/{remote}@{digests[arch]}" for arch in PLATFORMS]
+        # Версия защищена preflight; SHA-тег main после повторной сборки
+        # того же commit указывает на прежние образы и переписывается.
+        index = verified_index(registry, remote, tag, children, replace=not version)
+        if index is None:
+            command(
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--tag",
+                f"{host}/{remote}:{tag}",
+                *sources,
             )
+            index = verified_index(registry, remote, tag, children)
+        if index is None:
+            raise DeliveryError(f"Общий тег {host}/{remote}:{tag} не появился")
         latest = (
             "пропущен для релизного тега" if version else "пропущен: main уже изменён"
         )
         if not version and main_sha == commit:
-            latest_reference = f"ghcr.io/{remote}:latest"
-            command("docker", "tag", image, latest_reference)
-            command("docker", "push", latest_reference)
-            if registry.inspect(remote, "latest") != found:
-                raise DeliveryError(
-                    f"latest для {remote} не совпадает с проверенным manifest"
-                )
+            command(
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--tag",
+                f"{host}/{remote}:latest",
+                *sources,
+            )
+            if verified_index(registry, remote, "latest", children) is None:
+                raise DeliveryError(f"latest для {remote} не появился после записи")
             latest = "опубликован и проверен"
         report.append(
             {
-                "image": reference,
-                "digest": f"ghcr.io/{remote}@{found[1]}",
+                "image": f"{host}/{remote}:{tag}",
+                "digest": f"{host}/{remote}@{index}",
+                "platforms": {
+                    arch: f"{host}/{remote}@{digests[arch]}" for arch in PLATFORMS
+                },
                 "latest": latest,
             }
         )
     return report
 
 
-def write_summary(report: list[dict[str, str]]) -> None:
-    """Показать обе ссылки и immutable digest в сводке GitHub Actions."""
-    lines = ["## Проверенные API и UI образы", ""]
+def write_summary(report: list[dict]) -> None:
+    """Показать общие ссылки, digest index и обеих архитектур в сводке Actions."""
+    lines = ["## Проверенные API и UI образы (amd64 и arm64)", ""]
     for item in report:
         lines.extend(
             [
                 f"- Образ: `{item['image']}`",
-                f"- Digest: `{item['digest']}`",
+                f"- Digest index: `{item['digest']}`",
+                *[
+                    f"- {arch}: `{reference}`"
+                    for arch, reference in item.get("platforms", {}).items()
+                ],
                 f"- latest: {item['latest']}",
                 "",
             ]

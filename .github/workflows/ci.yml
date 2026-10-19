@@ -395,56 +395,10 @@ jobs:
           print("OK ui: UID/GID 10001; only Streamlit client, no server code")
           '
 
-      # Известные уязвимости ОС и Python-пакетов в обоих образах. Trivy запускается
-      # образом, закреплённым по digest, без trivy-action: в марте 2026 теги
-      # trivy-action и образы Trivy 0.69.4–0.69.6 были подменены (CVE-2026-33634).
-      # Блокируют HIGH/CRITICAL, для которых уже выпущено исправление; полный
-      # список, включая уязвимости без исправления, сохраняется в JSON-отчёте.
-      - name: Scan images for known vulnerabilities
-        env:
-          TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
-        run: |
-          mkdir -p reports/image-scan "$RUNNER_TEMP/trivy-cache"
-          scan() {
-            docker run --rm \
-              -v /var/run/docker.sock:/var/run/docker.sock \
-              -v "$RUNNER_TEMP/trivy-cache:/cache" \
-              -v "$PWD/reports/image-scan:/reports" \
-              "$TRIVY_IMAGE" --cache-dir /cache image --quiet --scanners vuln "$@"
-          }
-          # База уязвимостей скачивается отдельно с повтором: реестр иногда
-          # отвечает ограничением или обрывом, и это не должно ронять сборку.
-          for attempt in 1 2 3; do
-            if scan --download-db-only; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "База уязвимостей Trivy не скачалась за 3 попытки" >&2
-              exit 1
-            fi
-            sleep 20
-          done
-          status=0
-          for image in ai-support-agent:ci ai-support-agent-ui:ci; do
-            name="${image%%:*}"
-            scan --skip-db-update --format json --output "/reports/$name.json" "$image"
-            scan --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed \
-              --exit-code 1 "$image" || status=1
-          done
-          exit "$status"
-
-      - name: Upload image scan reports
-        if: ${{ !cancelled() && hashFiles('reports/image-scan/*.json') != '' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: image-scan
-          path: reports/image-scan/
-          if-no-files-found: error
-          retention-days: 7
-
       # Те же Dockerfile и uv.lock для arm64: Mac на Apple Silicon, ARM-ноутбуки
       # и серверы. Сборка и запуск идут под эмуляцией QEMU; образ проверяется
-      # на архитектуру, состав и ответ /health. Публикуются пока amd64-образы.
+      # на архитектуру, состав и ответ /health. Эти же образы сканируются и
+      # публикуются вместе с amd64 под общими тегами.
       - name: Build and start arm64 images under QEMU
         env:
           BINFMT_IMAGE: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
@@ -487,6 +441,54 @@ jobs:
           docker logs "$api" 2>&1 | tail -20
           docker logs "$ui" 2>&1 | tail -20
           exit 1
+
+      # Известные уязвимости ОС и Python-пакетов во всех четырёх образах. Trivy запускается
+      # образом, закреплённым по digest, без trivy-action: в марте 2026 теги
+      # trivy-action и образы Trivy 0.69.4–0.69.6 были подменены (CVE-2026-33634).
+      # Блокируют HIGH/CRITICAL, для которых уже выпущено исправление; полный
+      # список, включая уязвимости без исправления, сохраняется в JSON-отчёте.
+      - name: Scan images for known vulnerabilities
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        run: |
+          mkdir -p reports/image-scan "$RUNNER_TEMP/trivy-cache"
+          scan() {
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$RUNNER_TEMP/trivy-cache:/cache" \
+              -v "$PWD/reports/image-scan:/reports" \
+              "$TRIVY_IMAGE" --cache-dir /cache image --quiet --scanners vuln "$@"
+          }
+          # База уязвимостей скачивается отдельно с повтором: реестр иногда
+          # отвечает ограничением или обрывом, и это не должно ронять сборку.
+          for attempt in 1 2 3; do
+            if scan --download-db-only; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "База уязвимостей Trivy не скачалась за 3 попытки" >&2
+              exit 1
+            fi
+            sleep 20
+          done
+          status=0
+          for image in ai-support-agent:ci ai-support-agent-ui:ci \
+            ai-support-agent:ci-arm64 ai-support-agent-ui:ci-arm64; do
+            name="${image/:/-}"
+            scan --skip-db-update --format json --output "/reports/$name.json" "$image"
+            scan --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed \
+              --exit-code 1 "$image" || status=1
+          done
+          exit "$status"
+
+      - name: Upload image scan reports
+        if: ${{ !cancelled() && hashFiles('reports/image-scan/*.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-scan
+          path: reports/image-scan/
+          if-no-files-found: error
+          retention-days: 7
 
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
       # --no-build гарантирует использование только что собранного образа.
@@ -598,7 +600,7 @@ jobs:
             exit 1
           fi
 
-      # Один архив содержит именно проверенные API/UI и оба image ID.
+      # Один архив содержит именно проверенные API/UI для amd64 и arm64 и их ID.
       # Для релизного тега используются те же gates, что и для main.
       - name: Export tested API and UI images
         if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
@@ -633,7 +635,8 @@ jobs:
     needs: container
     if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Четыре образа (API/UI × amd64/arm64) и общие index-теги для каждого пакета.
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write
@@ -679,8 +682,9 @@ jobs:
           main_sha="$(python3 -c "import json; print(json.load(open('main-ref.json'))['object']['sha'])")"
           printf 'MAIN_SHA=%s\n' "$main_sha" >> "$GITHUB_ENV"
 
-      # Сначала проверяются ID обоих загруженных образов и оба version-тега.
-      # Совпавший version-тег повторно не пишется; конфликт останавливает job.
+      # Сначала проверяются ID и платформы всех четырёх образов и все теги версии.
+      # Совпавший тег повторно не пишется; конфликт останавливает job до записи.
+      # Затем imagetools create связывает amd64 и arm64 в общий тег пакета.
       - name: Verify and publish tested API and UI images
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

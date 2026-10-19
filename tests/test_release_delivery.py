@@ -16,9 +16,20 @@ OTHER_COMMIT = "b" * 40
 API_ID = "sha256:" + "1" * 64
 UI_ID = "sha256:" + "2" * 64
 OTHER_ID = "sha256:" + "3" * 64
+API_ARM_ID = "sha256:" + "4" * 64
+UI_ARM_ID = "sha256:" + "5" * 64
 API_REPOSITORY = "merkertg/ai-support-agent"
 UI_REPOSITORY = API_REPOSITORY + "-ui"
-IMAGES = dict(zip(delivery.LOCAL_IMAGES, (API_ID, UI_ID), strict=True))
+# Порядок LOCAL_IMAGES: API amd64, UI amd64, API arm64, UI arm64.
+IMAGES = dict(
+    zip(delivery.LOCAL_IMAGES, (API_ID, UI_ID, API_ARM_ID, UI_ARM_ID), strict=True)
+)
+REMOTES = (API_REPOSITORY, UI_REPOSITORY)
+
+
+def correct_platform(image):
+    """Вернуть платформу, которую CI собрал под этим именем."""
+    return f"linux/{delivery.ARCHITECTURE[image]}"
 
 
 def git(*arguments):
@@ -117,19 +128,30 @@ def test_non_release_checks_do_not_query_tag_history(monkeypatch, ref):
     runner.assert_not_called()
 
 
-def test_export_and_load_preserve_both_tested_image_ids(monkeypatch, tmp_path):
-    """Один архив экспортируется и загружается без docker build и с обоими ID."""
+def test_export_and_load_preserve_all_tested_image_ids(monkeypatch, tmp_path):
+    """Один архив с четырьмя образами экспортируется и загружается без сборки."""
     runner = Mock(return_value="")
     monkeypatch.setattr(delivery, "command", runner)
     monkeypatch.setattr(delivery, "local_id", IMAGES.__getitem__)
+    monkeypatch.setattr(delivery, "local_platform", correct_platform)
     delivery.export_images(tmp_path, COMMIT)
     metadata = json.loads((tmp_path / "tested-images.json").read_text(encoding="utf-8"))
     assert metadata == {"commit": COMMIT, "images": IMAGES}
-    assert runner.call_args.args[-2:] == delivery.LOCAL_IMAGES
+    assert runner.call_args.args[-4:] == delivery.LOCAL_IMAGES
     assert runner.call_args.args[:2] == ("docker", "save")
     assert delivery.verify_images(tmp_path, COMMIT) == IMAGES
     assert runner.call_args.args[:2] == ("docker", "load")
     assert all("build" not in call.args for call in runner.call_args_list)
+
+
+def test_wrong_architecture_blocks_export(monkeypatch, tmp_path):
+    """amd64-образ под именем arm64 не попадёт в артефакт публикации."""
+    monkeypatch.setattr(delivery, "command", Mock(return_value=""))
+    monkeypatch.setattr(delivery, "local_id", IMAGES.__getitem__)
+    monkeypatch.setattr(delivery, "local_platform", lambda image: "linux/amd64")
+    with pytest.raises(delivery.DeliveryError, match="linux/arm64"):
+        delivery.export_images(tmp_path, COMMIT)
+    assert not (tmp_path / "tested-images.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -138,7 +160,7 @@ def test_export_and_load_preserve_both_tested_image_ids(monkeypatch, tmp_path):
         {"commit": OTHER_COMMIT, "images": IMAGES},
         {"commit": COMMIT, "images": {delivery.LOCAL_IMAGES[0]: API_ID}},
         {"commit": COMMIT, "images": {**IMAGES, "evil:ci": API_ID}},
-        {"commit": COMMIT, "images": {**IMAGES, delivery.LOCAL_IMAGES[1]: "short-id"}},
+        {"commit": COMMIT, "images": {**IMAGES, delivery.LOCAL_IMAGES[3]: "short-id"}},
         {"commit": COMMIT, "images": []},
         {"commit": COMMIT, "images": IMAGES, "extra": True},
         [],
@@ -147,7 +169,7 @@ def test_export_and_load_preserve_both_tested_image_ids(monkeypatch, tmp_path):
 def test_invalid_artifact_is_rejected_before_docker_load(
     monkeypatch, tmp_path, metadata
 ):
-    """Чужой commit, недостающий UI и повреждённые ID блокируются до загрузки."""
+    """Чужой commit, недостающий образ и повреждённые ID блокируются до загрузки."""
     (tmp_path / "tested-images.json").write_text(json.dumps(metadata), encoding="utf-8")
     runner = Mock()
     monkeypatch.setattr(delivery, "command", runner)
@@ -167,31 +189,151 @@ def test_loaded_image_id_mismatch_blocks_publication(monkeypatch, tmp_path):
         delivery.verify_images(tmp_path, COMMIT)
 
 
-class FakeRegistry:
-    """Хранить manifest в памяти и отмечать порядок preflight и записи Docker."""
+def test_loaded_image_with_wrong_platform_blocks_publication(monkeypatch, tmp_path):
+    """Совпавший ID не спасает образ, загруженный для другой архитектуры."""
+    (tmp_path / "tested-images.json").write_text(
+        json.dumps({"commit": COMMIT, "images": IMAGES}), encoding="utf-8"
+    )
+    monkeypatch.setattr(delivery, "command", Mock())
+    monkeypatch.setattr(delivery, "local_id", IMAGES.__getitem__)
+    monkeypatch.setattr(delivery, "local_platform", lambda image: "linux/s390x")
+    with pytest.raises(delivery.DeliveryError, match="собран не для"):
+        delivery.verify_images(tmp_path, COMMIT)
 
-    def __init__(self):
-        """Начать с отсутствующих удалённых тегов и пустого журнала событий."""
-        self.references = {}
+
+def encode(data):
+    """Получить bytes manifest и его digest, как registry."""
+    body = json.dumps(data, sort_keys=True).encode()
+    return body, "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+class FakeRegistry:
+    """Registry в памяти: docker push, buildx imagetools create и чтение manifest."""
+
+    host = "ghcr.io"
+
+    def __init__(self, mode="config"):
+        """mode задаёт, как CI видит ID образа: config, manifest или index."""
+        self.mode = mode
+        self.store = {}
         self.events = []
         self.tags = {}
+        self.payloads = {image: self.payload(image) for image in delivery.LOCAL_IMAGES}
+        self.tested = dict(IMAGES)
+        if mode != "config":
+            self.tested = {
+                image: encode(data)[1] for image, data in self.payloads.items()
+            }
 
-    def inspect(self, repository, tag):
-        """Прочитать удалённый тег, не изменяя registry."""
-        self.events.append(("inspect", repository, tag))
-        return self.references.get((repository, tag))
+    def payload(self, image):
+        """Manifest, который получит registry после docker push этого образа."""
+        arch = delivery.ARCHITECTURE[image]
+        manifest = single_manifest(IMAGES[image], media_type=delivery.MANIFEST_TYPES[0])
+        if self.mode != "index":
+            return manifest
+        body, digest = encode(manifest)
+        self.put_digest(image, manifest)
+        return {
+            "schemaVersion": 2,
+            "mediaType": delivery.INDEX_TYPES[1],
+            "manifests": [
+                {
+                    "mediaType": delivery.MANIFEST_TYPES[0],
+                    "digest": digest,
+                    "size": len(body),
+                    "platform": {"os": "linux", "architecture": arch},
+                },
+                {
+                    "mediaType": delivery.MANIFEST_TYPES[1],
+                    "digest": OTHER_ID,
+                    "size": 10,
+                    "platform": {"os": "unknown", "architecture": "unknown"},
+                },
+            ],
+        }
+
+    def put_digest(self, image, data):
+        """Сохранить дочерний manifest index во всех репозиториях проекта."""
+        body, digest = encode(data)
+        for remote in REMOTES:
+            self.store[remote, digest] = body
+
+    def put(self, remote, tag, data):
+        """Записать manifest под тегом и под его digest."""
+        body, digest = encode(data)
+        self.store[remote, tag] = body
+        self.store[remote, digest] = body
+        return digest
+
+    def fetch(self, remote, reference):
+        """Прочитать manifest, как настоящий Registry.fetch."""
+        self.events.append(("fetch", remote, reference))
+        body = self.store.get((remote, reference))
+        if body is None:
+            return None
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        return json.loads(body), body, {"Docker-Content-Digest": digest}
+
+    def inspect(self, remote, tag):
+        """Сверить manifest настоящим parser проекта."""
+        self.events.append(("inspect", remote, tag))
+        response = self.fetch(remote, tag)
+        return None if response is None else delivery.manifest_identity(*response)
 
     def command(self, *arguments):
-        """Имитировать только tag/push: любые другие команды считаются ошибкой."""
+        """Имитировать tag, push и imagetools create; остальное — ошибка."""
         self.events.append(arguments)
-        assert arguments[:2] in (("docker", "tag"), ("docker", "push"))
-        if arguments[1] == "tag":
-            self.tags[arguments[3]] = IMAGES[arguments[2]]
+        if arguments[:2] == ("docker", "tag"):
+            self.tags[arguments[3]] = arguments[2]
+        elif arguments[:2] == ("docker", "push"):
+            remote, tag = arguments[2].removeprefix("ghcr.io/").rsplit(":", 1)
+            self.put(remote, tag, self.payloads[self.tags[arguments[2]]])
         else:
-            remote, tag = arguments[2].removeprefix("ghcr.io/").split(":")
-            image_id = self.tags[arguments[2]]
-            self.references[remote, tag] = (image_id, image_id)
+            assert arguments[:5] == (
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--tag",
+            )
+            remote, tag = arguments[5].removeprefix("ghcr.io/").rsplit(":", 1)
+            manifests = []
+            for source in arguments[6:]:
+                source_remote, digest = source.removeprefix("ghcr.io/").split("@")
+                assert source_remote == remote
+                data = json.loads(self.store[remote, digest])
+                if data["mediaType"] in delivery.INDEX_TYPES:
+                    manifests.extend(data["manifests"])
+                else:
+                    arch = {IMAGES[i]: delivery.ARCHITECTURE[i] for i in IMAGES}[
+                        data["config"]["digest"]
+                    ]
+                    manifests.append(
+                        {
+                            "mediaType": data["mediaType"],
+                            "digest": digest,
+                            "size": 100,
+                            "platform": {"os": "linux", "architecture": arch},
+                        }
+                    )
+            self.put(
+                remote,
+                tag,
+                {
+                    "schemaVersion": 2,
+                    "mediaType": delivery.INDEX_TYPES[0],
+                    "manifests": manifests,
+                },
+            )
         return ""
+
+    def pushes(self):
+        """Список ссылок, отправленных docker push или imagetools."""
+        return [
+            event[2] if event[1] == "push" else event[5]
+            for event in self.events
+            if event[:2] == ("docker", "push") or event[1:2] == ("buildx",)
+        ]
 
 
 @pytest.fixture
@@ -203,64 +345,124 @@ def registry(monkeypatch):
 
 
 def publish(registry, **options):
-    """Проверить одинаковую пару API/UI образов с выбранной политикой тегов."""
-    return delivery.publish_images(IMAGES, API_REPOSITORY, COMMIT, registry, **options)
+    """Опубликовать четыре проверенных образа с выбранной политикой тегов."""
+    return delivery.publish_images(
+        registry.tested, API_REPOSITORY, COMMIT, registry, **options
+    )
 
 
-def test_main_publishes_sha_and_latest_for_both_images(registry):
-    """Текущий main публикует две пары SHA/latest и возвращает два digest."""
+def platform_children(registry, remote, tag):
+    """Прочитать архитектуры общего тега."""
+    return delivery.index_platforms(registry.fetch(remote, tag)[0])
+
+
+def test_main_publishes_multiarch_sha_and_latest_for_both_images(registry):
+    """Текущий main: теги архитектур, общий SHA-index и latest для API и UI."""
     report = publish(registry, main_sha=COMMIT)
     assert len(report) == 2
-    assert set(registry.references) == {
-        (repository, tag)
-        for repository in (API_REPOSITORY, UI_REPOSITORY)
-        for tag in (f"sha-{COMMIT}", "latest")
-    }
-    assert all(item["latest"] == "опубликован и проверен" for item in report)
+    for item, remote in zip(report, REMOTES, strict=True):
+        children = platform_children(registry, remote, f"sha-{COMMIT}")
+        assert set(children) == {"amd64", "arm64"}
+        for arch in delivery.PLATFORMS:
+            arch_digest = registry.inspect(remote, f"sha-{COMMIT}-{arch}")[1]
+            assert children[arch] == arch_digest
+            assert item["platforms"][arch] == f"ghcr.io/{remote}@{arch_digest}"
+        assert platform_children(registry, remote, "latest") == children
+        assert item["latest"] == "опубликован и проверен"
+        assert item["digest"] == (
+            f"ghcr.io/{remote}@{registry.inspect(remote, f'sha-{COMMIT}')[1]}"
+        )
 
 
 def test_old_main_never_overwrites_latest(registry):
-    """Поздно завершившийся старый commit публикует только SHA для API/UI."""
+    """Поздно завершившийся старый commit не трогает latest ни одного пакета."""
     publish(registry, main_sha=OTHER_COMMIT)
-    assert set(registry.references) == {
-        (API_REPOSITORY, f"sha-{COMMIT}"),
-        (UI_REPOSITORY, f"sha-{COMMIT}"),
-    }
+    assert all(not reference.endswith(":latest") for reference in registry.pushes())
+    assert all((remote, "latest") not in registry.store for remote in REMOTES)
 
 
-def test_release_preflights_both_images_before_first_push(registry):
-    """Обе ссылки проверяются прежде первой записи, latest/SHA релиз не меняет."""
+def test_release_preflights_everything_before_first_write(registry):
+    """Версия и теги архитектур обоих пакетов проверяются до первой записи."""
     report = publish(registry, version="v1.2.3", main_sha=COMMIT)
-    assert registry.events[:2] == [
-        ("inspect", API_REPOSITORY, "v1.2.3"),
-        ("inspect", UI_REPOSITORY, "v1.2.3"),
-    ]
-    assert set(registry.references) == {
-        (API_REPOSITORY, "v1.2.3"),
-        (UI_REPOSITORY, "v1.2.3"),
-    }
+    first_write = next(
+        index for index, event in enumerate(registry.events) if event[0] == "docker"
+    )
+    checked = {event[1:] for event in registry.events[:first_write]}
+    for remote in REMOTES:
+        assert {(remote, "v1.2.3-amd64"), (remote, "v1.2.3-arm64")} <= checked
+        assert (remote, "v1.2.3") in checked
+        assert set(platform_children(registry, remote, "v1.2.3")) == {"amd64", "arm64"}
     assert all("релизного тега" in item["latest"] for item in report)
+    assert all(not reference.endswith(":latest") for reference in registry.pushes())
 
 
-def test_conflicting_ui_version_prevents_any_api_push(registry):
-    """Занятый другим UI образом номер останавливает доставку до записи API."""
-    registry.references[UI_REPOSITORY, "v1.2.3"] = (OTHER_ID, OTHER_ID)
+def test_conflicting_ui_arm64_version_prevents_any_push(registry):
+    """Занятый другим образом UI arm64 останавливает релиз до записи API."""
+    registry.put(UI_REPOSITORY, "v1.2.3-arm64", single_manifest(OTHER_ID))
     with pytest.raises(delivery.DeliveryError, match="занята другим образом"):
         publish(registry, version="v1.2.3")
-    assert all(event[0] == "inspect" for event in registry.events)
-    assert (API_REPOSITORY, "v1.2.3") not in registry.references
+    assert registry.pushes() == []
 
 
-def test_identical_partial_release_recovers_only_missing_ui(registry):
-    """Повтор failed publish использует тот же артефакт и дописывает только UI."""
-    registry.references[API_REPOSITORY, "v1.2.3"] = (API_ID, API_ID)
+def test_existing_version_index_with_other_children_is_a_conflict(registry):
+    """Общий тег версии, указывающий на другой manifest, не перезаписывается."""
     publish(registry, version="v1.2.3")
-    assert [event for event in registry.events if event[:2] == ("docker", "push")] == [
-        ("docker", "push", f"ghcr.io/{UI_REPOSITORY}:v1.2.3")
+    registry.put(
+        API_REPOSITORY,
+        "v1.2.3",
+        {
+            "schemaVersion": 2,
+            "mediaType": delivery.INDEX_TYPES[0],
+            "manifests": [
+                {
+                    "mediaType": delivery.MANIFEST_TYPES[0],
+                    "digest": OTHER_ID,
+                    "size": 1,
+                    "platform": {"os": "linux", "architecture": "amd64"},
+                }
+            ],
+        },
+    )
+    registry.events.clear()
+    with pytest.raises(delivery.DeliveryError, match="занята другим образом"):
+        publish(registry, version="v1.2.3")
+    assert registry.pushes() == []
+
+
+def test_rebuilt_main_commit_replaces_its_sha_index(registry):
+    """Повторная сборка того же commit main переписывает SHA-index, а не падает."""
+    for remote in REMOTES:
+        registry.put(remote, f"sha-{COMMIT}", single_manifest(OTHER_ID))
+    report = publish(registry)
+    for item, remote in zip(report, REMOTES, strict=True):
+        children = platform_children(registry, remote, f"sha-{COMMIT}")
+        assert set(children) == {"amd64", "arm64"}
+        assert item["digest"].endswith(registry.inspect(remote, f"sha-{COMMIT}")[1])
+    assert f"ghcr.io/{API_REPOSITORY}:sha-{COMMIT}" in registry.pushes()
+
+
+def test_legacy_single_arch_version_is_not_replaced(registry):
+    """Версия, выпущенная раньше только для amd64, считается занятой."""
+    registry.put(API_REPOSITORY, "v1.2.3", single_manifest(API_ID))
+    with pytest.raises(delivery.DeliveryError, match="занята другим образом"):
+        publish(registry, version="v1.2.3")
+    assert registry.pushes() == []
+
+
+def test_identical_partial_release_recovers_only_missing_parts(registry):
+    """Повтор failed publish дописывает недостающее; полный повтор ничего не пишет."""
+    publish(registry, version="v1.2.3")
+    del registry.store[UI_REPOSITORY, "v1.2.3"]
+    del registry.store[UI_REPOSITORY, "v1.2.3-arm64"]
+    registry.events.clear()
+    publish(registry, version="v1.2.3")
+    assert registry.pushes() == [
+        f"ghcr.io/{UI_REPOSITORY}:v1.2.3-arm64",
+        f"ghcr.io/{UI_REPOSITORY}:v1.2.3",
     ]
     registry.events.clear()
     publish(registry, version="v1.2.3")
-    assert all(event[0] == "inspect" for event in registry.events)
+    assert registry.pushes() == []
 
 
 def test_registry_network_failure_before_push_fails_closed(registry):
@@ -268,14 +470,47 @@ def test_registry_network_failure_before_push_fails_closed(registry):
     registry.inspect = Mock(side_effect=delivery.DeliveryError("HTTP 403"))
     with pytest.raises(delivery.DeliveryError, match="403"):
         publish(registry, version="v1.2.3")
-    assert registry.events == []
+    assert registry.pushes() == []
 
 
 def test_post_push_config_mismatch_fails(registry):
     """Успех Docker push недостаточен: удалённый config ID обязан совпасть."""
-    registry.inspect = Mock(return_value=(OTHER_ID, OTHER_ID))
-    with pytest.raises(delivery.DeliveryError, match="не совпадает"):
+    registry.payloads[delivery.LOCAL_IMAGES[2]] = single_manifest(OTHER_ID)
+    with pytest.raises(delivery.DeliveryError, match="не совпадает с tested image ID"):
         publish(registry)
+
+
+def test_index_with_wrong_child_is_rejected_after_create(registry, monkeypatch):
+    """imagetools create обязан сослаться ровно на опубликованные manifest."""
+    original = registry.command
+
+    def tamper(*arguments):
+        """Подменить источник arm64 на amd64 при создании общего тега."""
+        if arguments[1:2] == ("buildx",):
+            arguments = (*arguments[:-1], arguments[-2])
+        return original(*arguments)
+
+    monkeypatch.setattr(delivery, "command", tamper)
+    with pytest.raises(delivery.DeliveryError):
+        publish(registry, main_sha=COMMIT)
+
+
+@pytest.mark.parametrize("mode", ["config", "manifest", "index"])
+def test_each_image_store_identity_publishes_exact_images(monkeypatch, mode):
+    """Classic Docker и containerd: SHA, latest и повтор версии без лишних записей."""
+    fake = FakeRegistry(mode)
+    monkeypatch.setattr(delivery, "command", fake.command)
+    report = delivery.publish_images(
+        fake.tested, API_REPOSITORY, COMMIT, fake, main_sha=COMMIT
+    )
+    for item, remote in zip(report, REMOTES, strict=True):
+        children = platform_children(fake, remote, f"sha-{COMMIT}")
+        assert set(children) == {"amd64", "arm64"}
+        assert platform_children(fake, remote, "latest") == children
+    delivery.publish_images(fake.tested, API_REPOSITORY, COMMIT, fake, version="v1.2.3")
+    fake.events.clear()
+    delivery.publish_images(fake.tested, API_REPOSITORY, COMMIT, fake, version="v1.2.3")
+    assert fake.pushes() == []
 
 
 @pytest.mark.parametrize(
@@ -288,6 +523,22 @@ def test_untrusted_repository_names_never_reach_docker(monkeypatch, repository):
     with pytest.raises(delivery.DeliveryError, match="имя GitHub"):
         delivery.publish_images(IMAGES, repository, COMMIT, Mock())
     runner.assert_not_called()
+
+
+def test_index_platforms_skip_attestations_and_reject_strangers():
+    """Attestation пропускается; чужая платформа или повтор архитектуры — ошибка."""
+    data = image_index()
+    assert delivery.index_platforms(data) == {"amd64": API_ID}
+    strange = image_index()
+    strange["manifests"][0]["platform"] = {"os": "windows", "architecture": "amd64"}
+    with pytest.raises(delivery.DeliveryError, match="неожиданную платформу"):
+        delivery.index_platforms(strange)
+    double = image_index()
+    double["manifests"][1] = dict(double["manifests"][0])
+    with pytest.raises(delivery.DeliveryError, match="неожиданную платформу"):
+        delivery.index_platforms(double)
+    with pytest.raises(delivery.DeliveryError, match="обеих архитектур"):
+        delivery.index_platforms(single_manifest())
 
 
 def single_manifest(image_id=API_ID, *, media_type=delivery.MANIFEST_TYPES[1]):
@@ -422,20 +673,26 @@ def test_redirects_never_forward_authorization():
     )
 
 
-def test_publication_summary_lists_both_digests(monkeypatch, tmp_path, capsys):
-    """Summary содержит API/UI и адреса для точного docker pull по digest."""
+def test_publication_summary_lists_index_and_architectures(
+    monkeypatch, tmp_path, capsys
+):
+    """Summary содержит общий тег, digest index и digest каждой архитектуры."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     report = [
-        {"image": "api:v1.2.3", "digest": API_ID, "latest": "skip"},
-        {"image": "ui:v1.2.3", "digest": UI_ID, "latest": "skip"},
+        {
+            "image": "api:v1.2.3",
+            "digest": API_ID,
+            "platforms": {"amd64": "api@amd", "arm64": "api@arm"},
+            "latest": "skip",
+        },
+        {"image": "ui:v1.2.3", "digest": UI_ID, "platforms": {}, "latest": "skip"},
     ]
     delivery.write_summary(report)
-    assert "api:v1.2.3" in summary.read_text(encoding="utf-8")
-    assert "ui:v1.2.3" in capsys.readouterr().out
-    assert API_ID in summary.read_text(encoding="utf-8") and UI_ID in summary.read_text(
-        encoding="utf-8"
-    )
+    text = summary.read_text(encoding="utf-8")
+    assert "api:v1.2.3" in text and "ui:v1.2.3" in capsys.readouterr().out
+    assert API_ID in text and UI_ID in text
+    assert "- arm64: `api@arm`" in text
 
 
 @pytest.mark.parametrize("payload", [[], None, {"token": ""}, {"token": 4}])
@@ -528,102 +785,6 @@ def test_classic_image_config_identity_remains_supported(media_type):
     response = http_response(data)
     found = delivery.manifest_identity(data, response.read(), response.headers)
     assert found[0] == API_ID and found[1] != API_ID
-
-
-@pytest.mark.parametrize("mode", ["config", "manifest", "index"])
-def test_main_and_release_publish_exact_api_ui_with_each_image_store(monkeypatch, mode):
-    """API/UI SHA/latest и повтор версии проверяются реальным parser для трёх ID."""
-    from urllib.parse import urlsplit
-
-    payloads = {
-        API_REPOSITORY: single_manifest(API_ID),
-        UI_REPOSITORY: single_manifest(UI_ID),
-    }
-    if mode == "index":
-        payloads = {
-            remote: image_index() | {"annotations": {"test.component": remote}}
-            for remote in payloads
-        }
-    digests = {
-        remote: "sha256:" + hashlib.sha256(json.dumps(data).encode()).hexdigest()
-        for remote, data in payloads.items()
-    }
-    tested_ids = dict(
-        zip(
-            delivery.LOCAL_IMAGES,
-            (
-                (API_ID, UI_ID)
-                if mode == "config"
-                else (digests[API_REPOSITORY], digests[UI_REPOSITORY])
-            ),
-            strict=True,
-        )
-    )
-    states = set()
-    commands = []
-    registry = delivery.Registry("actor", "SECRET")
-    registry.tokens = {remote: "BEARER" for remote in payloads}
-    registry.opener = Mock()
-
-    def open_manifest(request, timeout):
-        """Отдать registry JSON только после смоделированного push нужной ссылки."""
-        remote, tag = (
-            urlsplit(request.full_url).path.removeprefix("/v2/").split("/manifests/")
-        )
-        if (remote, tag) not in states:
-            raise HTTPError(request.full_url, 404, "missing", {}, BytesIO())
-        return http_response(payloads[remote])
-
-    def docker_command(*arguments):
-        """Записать remote reference после Docker push без настоящей публикации."""
-        commands.append(arguments)
-        assert arguments[:2] in (("docker", "tag"), ("docker", "push"))
-        if arguments[1] == "push":
-            states.add(tuple(arguments[2].removeprefix("ghcr.io/").rsplit(":", 1)))
-        return ""
-
-    registry.opener.open.side_effect = open_manifest
-    monkeypatch.setattr(delivery, "command", docker_command)
-    report = delivery.publish_images(
-        tested_ids, API_REPOSITORY, COMMIT, registry, main_sha=COMMIT
-    )
-    assert states == {
-        (remote, tag) for remote in payloads for tag in (f"sha-{COMMIT}", "latest")
-    }
-    assert {item["digest"] for item in report} == {
-        f"ghcr.io/{remote}@{digest}" for remote, digest in digests.items()
-    }
-    delivery.publish_images(
-        tested_ids, API_REPOSITORY, COMMIT, registry, version="v1.2.3"
-    )
-    before = len(commands)
-    delivery.publish_images(
-        tested_ids, API_REPOSITORY, COMMIT, registry, version="v1.2.3"
-    )
-    assert len(commands) == before
-    assert states == {
-        (remote, tag)
-        for remote in payloads
-        for tag in (f"sha-{COMMIT}", "latest", "v1.2.3")
-    }
-
-
-def test_child_manifest_id_cannot_approve_conflicting_index_version(monkeypatch):
-    """Совпадение с одним child digest index не равно совпадению tested index ID."""
-    registry = delivery.Registry("actor", "SECRET")
-    registry.tokens = {API_REPOSITORY: "BEARER", UI_REPOSITORY: "BEARER"}
-    registry.opener = Mock()
-    registry.opener.open.side_effect = [
-        http_response(single_manifest()),
-        http_response(image_index()),
-    ]
-    runner = Mock()
-    monkeypatch.setattr(delivery, "command", runner)
-    with pytest.raises(delivery.DeliveryError, match="занята другим образом"):
-        delivery.publish_images(
-            IMAGES, API_REPOSITORY, COMMIT, registry, version="v1.2.3"
-        )
-    runner.assert_not_called()
 
 
 def test_index_digest_mismatch_is_rejected_before_identity():

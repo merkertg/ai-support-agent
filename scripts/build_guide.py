@@ -1560,14 +1560,15 @@ def ci_pipeline(c, w, h):
         ),
         (
             "3. container",
-            "API + UI, Trivy, arm64\nCompose, smoke, demo\n"
-            "перезапуск и журнал\nдва tested image ID",
+            "API + UI, arm64 QEMU\nTrivy, Compose, smoke\n"
+            "демо, перезапуск\n4 tested image ID",
             VIOLET_L,
             VIOLET,
         ),
         (
             "4. publish",
-            "API + UI в GHCR\nmain: SHA и latest\nтег: vX.Y.Z\nбез новой сборки",
+            "API/UI amd64+arm64\nmain: SHA и latest\n"
+            "тег: vX.Y.Z\nобщий тег, без сборки",
             GREEN_L,
             GREEN,
         ),
@@ -2808,7 +2809,7 @@ def append_audit_pages(story, verification):
         "16",
         "CI: матрица проверок",
         "Каждый push в main проходит последовательные барьеры "
-        "перед публикацией двух образов.",
+        "перед публикацией API и UI для amd64 и arm64.",
         BLUE,
     )
     story += [
@@ -2819,13 +2820,13 @@ def append_audit_pages(story, verification):
                 ("Push в main", "Все обязательные задания", "После успеха"),
                 (
                     "Push vX.Y.Z из main",
-                    "Все пять заданий; проверка истории",
+                    "Все шесть заданий; проверка истории",
                     "Версия API/UI",
                 ),
-                ("PR с целью main", "delivery → checks/security → container", "Нет"),
+                ("PR с целью main", "delivery → checks/security/ОС → container", "Нет"),
                 (
                     "Run workflow вручную",
-                    "delivery → checks/security → container",
+                    "delivery → checks/security/ОС → container",
                     "Нет",
                 ),
             ],
@@ -2897,13 +2898,13 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "arm64",
-                    "Сборка и запуск образов под QEMU",
-                    "Apple Silicon и ARM-устройства",
+                    "Сборка, запуск и Trivy под QEMU",
+                    "Родной образ на Apple Silicon и ARM",
                 ),
                 (
                     "Доставка",
-                    "Загрузить оба tested образа; сверить оба ID",
-                    "Публикуется проверенная сборка",
+                    "4 tested образа; сверить ID и платформы",
+                    "Проверенные сборки под общим тегом",
                 ),
             ],
             [104, 208, W - 312],
@@ -2915,11 +2916,12 @@ def append_audit_pages(story, verification):
             "publish ожидаем. Полный состав шагов определяет .github/workflows/ci.yml."
         ),
         Spacer(1, 8),
-        p("Два проверенных образа на весь путь", H2),
+        p("Проверенные образы на весь путь", H2),
         p(
-            "container собирает и проверяет API и UI. В publish передаются "
-            "tested-images.tar и JSON с SHA коммита и двумя image ID; после "
-            "загрузки проверяются оба ID. Повторной сборки перед GHCR нет. "
+            "container собирает и проверяет API и UI для amd64 и arm64. В publish "
+            "передаются tested-images.tar и JSON с SHA коммита и четырьмя image ID; "
+            "после загрузки проверяются ID и платформы. Теги -amd64 и -arm64 "
+            "получают те же образы, общий тег — index из их digest. "
             "Это защищает от ситуации, когда тестируется одна "
             "сборка, а доставляется другая.",
             BODY_S,
@@ -2931,7 +2933,7 @@ def append_audit_pages(story, verification):
         "17",
         "Защита и доставка",
         "Технические ограничения проекта, права GitHub и "
-        "воспроизводимые версии двух образов.",
+        "воспроизводимые версии API и UI для двух архитектур.",
         VIOLET,
     )
     story += [
@@ -2973,7 +2975,8 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Публикация API/UI",
-                    "Успешный main: sha-<полный SHA>; latest только для вершины main",
+                    "main: sha-<полный SHA> для amd64 и arm64; "
+                    "latest только для вершины",
                 ),
                 (
                     "Версия vX.Y.Z",
@@ -2987,7 +2990,8 @@ def append_audit_pages(story, verification):
         p("Как получить ровно проверенную версию", H2),
         p(
             "Actions → CI and GHCR → нужный коммит → Publish tested image to GHCR. "
-            "В Summary скопируй полный тег sha-… или digest. "
+            "В Summary скопируй полный тег sha-… или digest index: Docker сам "
+            "возьмёт arm64 или amd64 под свой компьютер. "
             "latest меняется со следующими "
             "версиями; digest обозначает содержимое конкретного образа.",
             BODY_S,
@@ -3517,9 +3521,10 @@ def append_audit_pages(story, verification):
         ),
         Spacer(1, 7),
         p(
-            "Push тега запускает пять jobs: delivery → checks/security → "
-            "container → publish. Оба API/UI образа проходят проверки и "
-            "получают тот же vX.Y.Z; повторной сборки в publish нет. Существующий "
+            "Push тега запускает шесть jobs: delivery → checks/security/"
+            "portability → container → publish. API и UI для amd64 и arm64 "
+            "получают vX.Y.Z-amd64, vX.Y.Z-arm64 и общий vX.Y.Z; повторной "
+            "сборки в publish нет. Существующий "
             "version-тег с другим image ID останавливает доставку. Повтор "
             "идентичного образа разрешён. Релиз не двигает latest; main публикует "
             "sha-&lt;полный SHA&gt; и latest только для своей текущей вершины.",
@@ -3528,7 +3533,7 @@ def append_audit_pages(story, verification):
         Spacer(1, 7),
         callout(
             "CI настраивает доставку, но локальная проверка не доказывает результат "
-            "GitHub. Подтверди пять jobs итогового коммита и оба пакета GHCR в "
+            "GitHub. Подтверди шесть jobs итогового коммита и оба пакета GHCR в "
             "Actions Summary. Тег и GitHub Release автоматически не создаются.",
             VIOLET,
             VIOLET_L,
@@ -3566,7 +3571,7 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Подтвердить удалённый CI",
-                    "Пять успешных jobs итогового SHA и оба API/UI пакета GHCR",
+                    "Шесть успешных jobs итогового SHA и оба API/UI пакета GHCR",
                 ),
                 (
                     "Внешний сервер",

@@ -17,11 +17,11 @@ Run all commands from the project root, the directory containing `pyproject.toml
 | | Linux | macOS (Intel, Apple Silicon) | Windows 10/11 |
 | --- | --- | --- | --- |
 | Compose stack | Docker Engine or Desktop | Docker Desktop | Docker Desktop with the WSL 2 backend |
-| Image architecture | amd64 or arm64, built locally | arm64 on Apple Silicon, amd64 on Intel | amd64 (arm64 on ARM laptops) |
+| Image architecture | amd64 or arm64: local build and GHCR | arm64 on Apple Silicon, amd64 on Intel | amd64 (arm64 on ARM laptops) |
 | Python on the host | `uv sync --locked`, Python 3.12 | same | same |
 | Shell for the guides | Bash | Bash or zsh | Git Bash or WSL; PowerShell commands below |
 
-CI checks every push on all three systems (`Python on ubuntu-24.04`, `macos-15`, `windows-2025`): the same `uv.lock` installs, documentation checks, Ruff, unit tests, offline evaluations, and a real start of the API and UI. Docker images are built and smoke-tested for amd64 and, under emulation, for arm64. Integration tests with PostgreSQL and Qdrant run on Linux.
+CI checks every push on all three systems (`Python on ubuntu-24.04`, `macos-15`, `windows-2025`): the same `uv.lock` installs, documentation checks, Ruff, unit tests, offline evaluations, and a real start of the API and UI. Docker images are built and smoke-tested for amd64 and, under emulation, for arm64; both are published under one GHCR tag, so Docker pulls the native image. Integration tests with PostgreSQL and Qdrant run on Linux.
 
 Check your own computer without Docker, a database, or keys:
 
