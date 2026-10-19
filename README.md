@@ -23,6 +23,7 @@ Linux, macOS (Intel and Apple Silicon) and Windows are supported: CI runs the Py
 | 09 | Agent integration tests, evaluations and security checks | Implemented; offline retrieval metrics with fixed thresholds and 12 agent safety scenarios gate CI; live OpenAI quality is not measured |
 | 10 | Packaging, CI/CD, and GitHub demonstration materials | Implemented; Compose stack with UI, idempotent demo scenario, demo guide, CI/GHCR delivery |
 | + | Staff authentication, roles, and write rate limit | Implemented; hashed API tokens, `operator`/`reviewer`/`admin`, reviewer from the token, 401/403/429 checked in tests, smoke and CI |
+| + | Backup and restore of PostgreSQL and Qdrant | Implemented; `scripts/backup.py create/verify/restore`, manifest with Alembic revision, SHA256 and row counts, restore checked in tests and CI |
 
 ## Documentation
 
@@ -32,6 +33,7 @@ Instructions ([docs/instructions/](docs/instructions/)):
 - [Windows and PowerShell](docs/instructions/windows.md): Git Bash, WSL or PowerShell; equivalents of every Bash construct used in the guides
 - [Using the API](docs/instructions/usage.md): staff tokens, roles and rate limit, business records, draft previews, knowledge search, agent, human review
 - [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, coverage gate, offline evaluations, portability checks
+- [Резервное копирование и восстановление](docs/instructions/backup.md): копия PostgreSQL и Qdrant, проверка SHA256, восстановление в чистые тома, откат обновления, хранение секретных копий, PowerShell
 - [CI and delivery to GHCR](docs/instructions/ci-and-delivery.md)
 - [Project structure](docs/instructions/project-structure.md)
 

@@ -137,6 +137,15 @@ Bodies, query strings, SQL, driver messages, and SDK response texts are not logg
 
 ## Update an existing stack
 
+Перед обновлением сделай резервную копию: она нужна, если новую версию придётся
+откатить (`alembic downgrade` удаляет данные новых таблиц). Команды, место
+хранения секретной копии и порядок отката — в
+[инструкции резервного копирования](backup.md#откатить-неудачное-обновление).
+
+```bash
+uv run --locked python scripts/backup.py create --output-dir "$HOME/ai-support-backups"
+```
+
 After pulling new code, rebuild and restart without `down`:
 
 ```bash

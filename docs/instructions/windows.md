@@ -6,7 +6,7 @@ The guides show commands for Bash, the shell of Linux and macOS. On Windows you 
 
 | Way | When to use it |
 | --- | --- |
-| **PowerShell 7** (`pwsh`) | Recommended for everyday work. The commands below, and the PowerShell blocks in [DEMO](../DEMO.md), [Stage 08](../STAGE_08.md), [Stage 10](../STAGE_10.md) and [Using the API](usage.md), are written for it. |
+| **PowerShell 7** (`pwsh`) | Recommended for everyday work. The commands below, and the PowerShell blocks in [DEMO](../DEMO.md), [Stage 08](../STAGE_08.md), [Stage 10](../STAGE_10.md), [Using the API](usage.md) and [Backup and restore](backup.md#powershell), are written for it. |
 | **Git Bash** | Installed with [Git for Windows](https://git-scm.com/downloads/win). Bash commands from any guide work as written. |
 | **WSL 2** | A Linux distribution inside Windows. Clone the project inside WSL (for example in `~/ai-support-agent`), not under `/mnt/c`, and follow the Linux instructions. |
 

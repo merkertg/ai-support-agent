@@ -165,8 +165,11 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: uv run --locked ruff format --check .
 
+      # Тест резервной копии выполняет pg_dump/pg_restore внутри контейнера этой БД.
       - name: Run all tests
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        env:
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
           uv run --locked pytest -v --junitxml=reports/pytest.xml \
             --cov --cov-report=term-missing:skip-covered \
@@ -659,6 +662,63 @@ jobs:
             echo "Токен сотрудника попал в журнал API" >&2
             exit 1
           fi
+
+      # Резервная копия изолированного проекта: pg_dump в контейнере db и snapshot
+      # Qdrant с SHA256 в манифесте. Затем тома удаляются, и стенд восстанавливается
+      # из копии в чистые тома. Записи, запуск агента, поиск и демо сравниваются
+      # побайтно, а прежний API_TOKEN (в БД только его SHA-256) снова проходит smoke.
+      # Копия лежит во временном каталоге runner и артефактом не загружается.
+      - name: Back up, restore into clean volumes and repeat smoke
+        run: |
+          api="http://127.0.0.1:${API_PORT}"
+          auth="Authorization: Bearer $API_TOKEN"
+          search='{"query":"Сервер не запускается после обновления","product_code":"techflow-server"}'
+          run_path="$(grep -o -m 1 '/api/agent-runs/[0-9]*' smoke.log)"
+          test -n "$run_path"
+          python3 scripts/backup.py create --project-name ai-support-ci \
+            --output-dir "$RUNNER_TEMP/backups" > backup.json
+          backup="$(python3 -c 'import json; print(json.load(open("backup.json"))["path"])')"
+          python3 scripts/backup.py verify "$backup" > /dev/null
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.db.demo show > restore-before.json
+          curl --fail --silent --show-error -H "$auth" "$api$run_path" > restore-run-before.json
+          curl --fail --silent --show-error -H "$auth" -H 'Content-Type: application/json' \
+            -d "$search" "$api/api/knowledge/search" > restore-knowledge-before.json
+          # Пока api работает и данные есть, restore отказывается что-либо менять.
+          if python3 scripts/backup.py restore "$backup" --project-name ai-support-ci \
+            2> restore-refused.log; then
+            echo "restore изменил работающий стенд" >&2
+            exit 1
+          fi
+          grep -q 'запущены сервисы api' restore-refused.log
+          # down --volumes удаляет тома: дальше данные есть только в копии.
+          docker compose --project-name ai-support-ci down --volumes
+          docker compose --project-name ai-support-ci up \
+            --detach --no-build --wait --wait-timeout 90 db qdrant
+          python3 scripts/backup.py restore "$backup" --project-name ai-support-ci \
+            > restored.json
+          python3 -c '
+          import json
+          r = json.load(open("restored.json"))
+          assert r["replaced"] == [] and not r["migration_needed"], r
+          assert r["rows"] > 0 and r["points"] > 0, r
+          print("OK restore:", r["alembic_revision"], r["tables"], "tables,",
+                r["rows"], "rows,", r["points"], "points")
+          '
+          docker compose --project-name ai-support-ci up \
+            --detach --no-build --wait --wait-timeout 90 api ui
+          docker compose --project-name ai-support-ci exec -T api \
+            python -m app.db.demo show > restore-after.json
+          cmp restore-before.json restore-after.json
+          curl --fail --silent --show-error -H "$auth" "$api$run_path" > restore-run-after.json
+          cmp restore-run-before.json restore-run-after.json
+          curl --fail --silent --show-error -H "$auth" -H 'Content-Type: application/json' \
+            -d "$search" "$api/api/knowledge/search" > restore-knowledge-after.json
+          cmp restore-knowledge-before.json restore-knowledge-after.json
+          python3 scripts/demo_scenario.py \
+            --url "$api" --timeout 60 --verify-review > demo-restored.json
+          cmp demo.json demo-restored.json
+          python3 scripts/smoke_test.py --base-url "$api" --timeout 30 --check-review
 
       # Один архив содержит именно проверенные API/UI для amd64 и arm64 и их ID.
       # Для релизного тега используются те же gates, что и для main.

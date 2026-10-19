@@ -56,6 +56,7 @@ evaluations/
   thresholds.json        # Gates fixed before the first measurement
 tests/
   integration/           # Real PostgreSQL, migrations and complete HTTP workflows
+                         # (test_backup_restore.py: backup → wipe → restore on db-test/qdrant-test)
   test_health.py         # Standalone API behavior
   test_readiness.py      # Database readiness behavior
   test_config.py         # Environment configuration
@@ -80,6 +81,7 @@ tests/
   test_release_delivery.py    # Release tags, image export and GHCR publication
   test_update_dependencies.py # Weekly dependency PR preparation and writer
   test_project_checks.py # Docstrings, links, Bash and PowerShell examples
+  test_backup.py         # Backup, verify and restore with fake Docker and fake Qdrant
   conftest.py            # In-memory checkpointer and a test admin for unit tests
                          # (integration tests send real tokens instead)
 scripts/
@@ -91,8 +93,9 @@ scripts/
   demo_scenario.py       # Idempotent mock demo through the HTTP API
   check_dependency_age.py # Release-age policy for uv.lock and exclude-newer
   build_guide.py         # Reproducible Russian PDF guide; explicit CLI only
+  backup.py              # Backup, verify and restore PostgreSQL + Qdrant of a Compose stack
 docs/
-  instructions/          # Quickstart, Windows, API usage, testing, CI and this file
+  instructions/          # Quickstart, Windows, API usage, testing, backup, CI and this file
   guide/                 # PDF guide, build instructions and verification evidence
   APPROACH.md            # Current design and future architecture
   CI_CD.md               # CI/CD guide in Russian
@@ -116,7 +119,8 @@ compose.yaml             # PostgreSQL, Qdrant, migration, API, UI and isolated t
 alembic.ini              # Migration configuration without a stored database URL
 .env.example             # Local development settings
 Dockerfile               # API runtime image (default) and separate UI target
-.dockerignore            # Excludes local environments, secrets and caches
+.dockerignore            # Excludes local environments, secrets, backups and caches
+backups/                 # Default folder for backups; ignored by Git and Docker, keep copies elsewhere
 pyproject.toml           # Metadata, dependencies and tool settings
 uv.lock                  # Resolved dependency versions
 README.md                # Short description, roadmap and documentation index

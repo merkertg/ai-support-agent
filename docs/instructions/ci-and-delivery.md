@@ -25,7 +25,7 @@ Dependency audit: locked API/UI packages + current vulnerability data
 Portability: Linux, macOS, Windows — uv.lock + docs + Ruff + unit tests + real API/UI start
                                   ↓ all three must pass
 API/UI builds + UID/tools gates + arm64 build/start under QEMU + SBOM and Trivy (4 images)
-  + Compose + knowledge + HTTP + persistence
+  + Compose + knowledge + HTTP + persistence + backup → clean volumes → restore → smoke
   + Streamlit health/page render + demo review branches + license log leak check
                                   ↓
 Publish the same tested API and UI images (amd64 + arm64) to GHCR under shared tags
@@ -52,7 +52,14 @@ The container scenario checks non-root users and excluded development tools,
 indexes knowledge, verifies API operations, runs a mock agent and both review
 branches, recreates containers while retaining PostgreSQL/Qdrant volumes,
 resumes a waiting review, renders the real Streamlit page, and confirms that
-license keys did not enter the JSON API log. All third-party images and
+license keys did not enter the JSON API log.
+Затем `scripts/backup.py` делает копию проекта `ai-support-ci` (дамп PostgreSQL,
+snapshot Qdrant, манифест с SHA256), проверяет её и убеждается, что `restore`
+отказывается менять работающий стенд. После `down --volumes` копия
+восстанавливается в чистые тома; записи, запуск агента, поиск и демо
+совпадают побайтно, а прежний токен снова проходит smoke `--check-review`.
+Копия остаётся во временном каталоге runner и не загружается артефактом
+([резервное копирование](backup.md)). All third-party images and
 external actions are pinned by digest or commit.
 
 The `tested-docker-images` artifact contains one `tested-images.tar` archive

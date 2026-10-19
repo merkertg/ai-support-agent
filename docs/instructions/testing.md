@@ -31,6 +31,8 @@ TEST_QDRANT_URL=http://127.0.0.1:6336 \
     --cov-report=xml --cov-report=json --cov-report=html
 ```
 
+Тест резервной копии `tests/integration/test_backup_restore.py` выполняет `pg_dump` и `pg_restore` внутри контейнера тестовой PostgreSQL. Контейнер берётся из `TEST_POSTGRES_CONTAINER`, а без этой переменной — находится через `docker ps` по опубликованному порту из `TEST_DATABASE_URL` (для `db-test` это `5434`). В CI задание `checks` передаёт `${{ job.services.postgres.id }}`. Без контейнера тест локально пропускается, а с `CI=true` падает. Он заменяет только БД с суффиксом `_test` и свою коллекцию `test_*`; подробности — в [инструкции резервного копирования](backup.md#как-это-проверяется).
+
 Integration fixtures reset the schema through Alembic. They accept only an explicitly provided `TEST_DATABASE_URL` whose database name ends in `_test`; they never fall back to the development `DATABASE_URL`. Knowledge tests use only an explicit `TEST_QDRANT_URL` and create and delete their own `test_*` collections. In CI, a missing test URL fails the checks. Unit tests use an in-process Qdrant (`:memory:`) and need neither service. `tests/conftest.py` gives every test an in-memory LangGraph checkpointer, so no test writes workflow state to the development database; review integration tests replace it with a `PostgresSaver` on the `_test` database.
 
 To inspect the development migration state separately:

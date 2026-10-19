@@ -601,7 +601,7 @@ def cover_page(c, doc):
         "17  Защита и доставка",
         "18  Полный прогон",
         "19  Путь оператора",
-        "20  Перезапуск",
+        "20  Перезапуск и копии",
         "21  Диагностика",
         "22  Покрытие и recovery",
         "23  Обновления и релизы",
@@ -1562,7 +1562,7 @@ def ci_pipeline(c, w, h):
         (
             "3. container",
             "API + UI, arm64 QEMU\nTrivy, SBOM, smoke\n"
-            "демо, перезапуск\n4 tested image ID",
+            "демо, перезапуск, restore\n4 tested image ID",
             VIOLET_L,
             VIOLET,
         ),
@@ -2884,9 +2884,9 @@ def append_audit_pages(story, verification):
                     "Путь от обращения до сообщения",
                 ),
                 (
-                    "Пересоздание",
-                    "Данные, индекс, pending workflow",
-                    "Состояние сохраняется в томах",
+                    "Пересоздание, копия",
+                    "Тома, pending; backup → restore",
+                    "Данные в томах и в копии",
                 ),
                 (
                     "UI и демо",
@@ -3210,8 +3210,8 @@ def append_audit_pages(story, verification):
     section(
         story,
         "20",
-        "Перезапуск и данные",
-        "Остановка контейнеров, сохранность томов и продолжение решения сотрудника.",
+        "Перезапуск, данные и копии",
+        "Тома при down/up, резервная копия с восстановлением и ожидающее решение.",
         GREEN,
     )
     story += [
@@ -3237,12 +3237,12 @@ def append_audit_pages(story, verification):
         Spacer(1, 11),
         p("Сравнить предметные данные до и после", H2),
         code_block(
-            "docker compose exec -T api python -m app.db.demo seed \\\n"
-            "  > /tmp/ai-support-before.json\n"
+            "docker compose exec -T api python -m app.db.demo seed "
+            "> /tmp/ai-support-before.json\n"
             "docker compose down\n"
             "docker compose up --detach --no-build --wait ui\n"
-            "docker compose exec -T api python -m app.db.demo show \\\n"
-            "  > /tmp/ai-support-after.json\n"
+            "docker compose exec -T api python -m app.db.demo show "
+            "> /tmp/ai-support-after.json\n"
             "cmp /tmp/ai-support-before.json /tmp/ai-support-after.json"
         ),
         Spacer(1, 7),
@@ -3263,6 +3263,23 @@ def append_audit_pages(story, verification):
             BODY_S,
         ),
         Spacer(1, 9),
+        p("Резервная копия и восстановление", H2),
+        code_block(
+            "uv run --locked python scripts/backup.py create "
+            '--output-dir "$HOME/ai-support-backups"\n'
+            "docker compose up --detach --wait db qdrant   # чистые тома\n"
+            'uv run --locked python scripts/backup.py restore "$backup"'
+        ),
+        Spacer(1, 5),
+        p(
+            "pg_dump в контейнере db, snapshot Qdrant и manifest.json (Alembic, "
+            "SHA256, строки). restore сверяет копию и версию Alembic, требует "
+            "остановленный api и пустую цель (иначе --force) и заменяет рабочую БД "
+            "последней. Копия секретна: храни вне Git и репозитория "
+            "(docs/instructions/backup.md).",
+            BODY_S,
+        ),
+        Spacer(1, 9),
         p("Проверить ожидающий процесс", H2),
         p(
             "Создай анализ и сохрани run_id, оставив предложение "
@@ -3279,12 +3296,10 @@ def append_audit_pages(story, verification):
         ),
         Spacer(1, 10),
         callout(
-            "Обычный docker compose down сохраняет именованные "
-            "тома. Параметр --volumes "
-            "удаляет данные и применяется CI только к своему изолированному проекту. "
-            "Сохранение тома не заменяет резервное копирование. Автоматический backup "
-            "пока не настроен. Брошенные running завершаются автоматически: "
-            "порог 180 секунд, таймер 30 секунд; подробности - в разделе 22.",
+            "Обычный down сохраняет тома; --volumes удаляет данные и применяется "
+            "CI только к своему проекту, где копия восстанавливается в чистые тома. "
+            "Брошенные running завершаются автоматически: порог 180 с, таймер 30 с "
+            "(раздел 22).",
             GREEN,
             GREEN_L,
         ),
@@ -3617,8 +3632,8 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Внешний сервер",
-                    "Выбрана площадка, настроены секреты/backup; проверка "
-                    "работающего сервиса после deploy",
+                    "Выбрана площадка и секреты; расписание backup.py и "
+                    "шифрованное хранилище копий; проверка после deploy",
                 ),
             ],
             [150, W - 150],
