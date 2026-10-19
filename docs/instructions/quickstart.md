@@ -107,6 +107,23 @@ docker compose down
 
 Ordinary `down` retains the named PostgreSQL and Qdrant volumes and their data.
 
+## Создать обращение через интерфейс
+
+1. Открой [интерфейс оператора](http://127.0.0.1:8502), введи свой токен
+   сотрудника в боковой панели и выбери **Обращения** → **Создать обращение**.
+2. Сначала выбери **Клиент** по имени и email, затем **Продукт** по названию
+   и коду. Автоматического выбора нет; кнопка создания станет доступна,
+   когда выбраны обе записи.
+3. Списки показывают по 20 записей. Кнопки **Назад** и **Далее** листают
+   каждый справочник независимо. Поиск в выпадающем списке действует только
+   на текущей странице. Если справочник пуст, создай запись в **Справочники**.
+4. После выбора заполни тему, описание и приоритет, затем нажми
+   **Создать обращение**. Смена выбора или страницы обновляет интерфейс
+   и может сбросить ещё не отправленный текст: заверши поиск до его ввода.
+
+Выбор и перелистывание не создают обращения; запись сохраняется только
+после отправки формы. Подробности — в [инструкции этапа 08](../STAGE_08.md).
+
 ## Read the API log
 
 The API writes one JSON line per event to stdout: requests (method, path without the query string, status, duration), agent runs, resource and database errors, failed LLM calls, and workflow checkpoint repairs. Every line carries `request_id`, which the API also returns in the `X-Request-ID` response header; the operator UI shows it as «Код запроса для администратора» next to an error.

@@ -139,18 +139,69 @@ def render_run(run: dict) -> None:
         st.json({"tool_trace": run.get("tool_trace", []), "usage": run.get("usage")})
 
 
+def record_selector(
+    client: APIClient, resource: str, label: str, *, key: str
+) -> int | None:
+    """Выбрать запись по названию на одной странице, сохраняя точность BIGINT.
+
+    Email или код различают одинаковые названия. Скрытый выбор сбрасывается;
+    каждый GET читает только текущую страницу и не кеширует удалённые записи.
+    """
+    offset = page_offset(key)
+    rows = client.list_records(resource, offset=offset)
+    detail = "email" if resource == "customers" else "code"
+    choices = {str(row["id"]): f"{row['name']} — {row[detail]}" for row in rows}
+    choice_key = f"{key}_choice"
+    if st.session_state.get(choice_key) not in choices:
+        st.session_state[choice_key] = None
+    selected = st.selectbox(
+        label,
+        list(choices),
+        index=None,
+        format_func=lambda value: choices[value],
+        key=choice_key,
+        placeholder=f"Выберите: {label.lower()}",
+        disabled=not choices,
+    )
+    pagination(key, offset, len(rows))
+    if not rows:
+        records = "клиентов" if resource == "customers" else "продуктов"
+        st.info(
+            f"На этой странице нет {records}. Вернитесь на предыдущую страницу "
+            "или добавьте запись в разделе «Справочники»."
+        )
+    return int(selected) if selected is not None else None
+
+
 def create_ticket(client: APIClient) -> None:
-    """Создать обращение по существующим ID; API проверит ссылки и ограничения."""
+    """Выбрать клиента и продукт по названию и явно отправить форму обращения."""
     with st.expander("Создать обращение"):
-        st.caption("Сначала создайте клиента и продукт в разделе «Справочники».")
+        st.caption(
+            "Сначала выберите клиента и продукт, затем заполните тему и описание. "
+            "Поиск в списке работает на текущей странице; для остальных записей "
+            "используйте кнопки «Назад» и «Далее»."
+        )
+        try:
+            customer = record_selector(
+                client, "customers", "Клиент", key="create_ticket_customer"
+            )
+            product = record_selector(
+                client, "products", "Продукт", key="create_ticket_product"
+            )
+        except APIError as error:
+            show_error(error)
+            return
         with st.form("create_ticket", clear_on_submit=False):
-            customer = id_input("ID клиента", key="create_ticket_customer")
-            product = id_input("ID продукта", key="create_ticket_product")
             subject = st.text_input("Тема", max_chars=300)
             description = st.text_area("Описание проблемы", max_chars=10_000)
             priority = st.selectbox("Приоритет", list(PRIORITIES), index=1)
-            submitted = st.form_submit_button("Создать обращение")
+            submitted = st.form_submit_button(
+                "Создать обращение", disabled=customer is None or product is None
+            )
         if submitted:
+            if customer is None or product is None:
+                st.error("Выберите клиента и продукт.")
+                return
             if not subject.strip() or not description.strip():
                 st.error("Заполните тему и описание проблемы.")
                 return

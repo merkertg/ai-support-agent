@@ -19,7 +19,7 @@ Linux, macOS (Intel and Apple Silicon) and Windows are supported: CI runs the Py
 | 05 | Tool calling and the agent execution loop | Implemented; mock agent saves runs and pending suggestions, live OpenAI validation requires credentials |
 | 06 | RAG, embeddings, and Qdrant document search | Implemented; mock embeddings, product-scoped search and agent citations, live OpenAI embeddings require credentials |
 | 07 | LangGraph workflow and human review | Implemented; PostgreSQL checkpoints, approve/reject with simulated delivery, resume after restart |
-| 08 | Streamlit operator interface | Implemented; tickets, review queue, knowledge search, dashboard and catalogs over the HTTP API; separate UI image |
+| 08 | Streamlit operator interface | Implemented; tickets with customer/product name selectors, review queue, knowledge search, dashboard and catalogs over the HTTP API; separate UI image |
 | 09 | Agent integration tests, evaluations and security checks | Implemented; offline retrieval metrics with fixed thresholds and 12 agent safety scenarios gate CI; live OpenAI quality is not measured |
 | 10 | Packaging, CI/CD, and GitHub demonstration materials | Implemented; Compose stack with UI, idempotent demo scenario, demo guide, CI/GHCR delivery |
 | + | Staff authentication, roles, and write rate limit | Implemented; hashed API tokens, `operator`/`reviewer`/`admin`, reviewer from the token, 401/403/429 checked in tests, smoke and CI |

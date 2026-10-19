@@ -4,6 +4,26 @@
 
 Authentication and roles, business records, LLM draft previews, knowledge base search, the agent, human review, and the operator endpoints. Start the stack and issue your first staff token with the [quickstart](quickstart.md) first. The same operations are available without curl in the [operator interface](http://127.0.0.1:8502), described in the [Stage 08 guide](../STAGE_08.md).
 
+## Создание обращения в браузере
+
+В [интерфейсе оператора](http://127.0.0.1:8502) войди по токену и открой
+**Обращения** → **Создать обращение**. В полях **Клиент** и **Продукт**
+выбери имя/email клиента и название/код продукта. Это позволяет различать
+одноимённые записи; API получает их обычные числовые `customer_id` и
+`product_id`, права и проверка ссылок сохраняются.
+
+Каждый список загружает 20 записей и имеет независимые **Назад**/**Далее**.
+Поиск внутри выпадающего списка ограничен текущей страницей: для поиска
+в другой группе записей сначала перейди на неё. Первая запись автоматически
+не выбирается, а отправка недоступна, пока не выбраны оба справочника.
+Если список пуст, нужную запись сначала создают в **Справочники**.
+
+Сначала закончи выбор и перелистывание, затем заполни тему, описание
+и приоритет. Изменение списка или страницы обновляет экран и может сбросить
+ещё не отправленный текст формы. Сам выбор делает только GET-запросы;
+`POST /api/tickets` выполняется при нажатии **Создать обращение**.
+[Полный проход](../STAGE_08.md) включает открытие карточки и запуск анализа.
+
 ## Authentication, roles and rate limit
 
 Every route under `/api/` requires a staff token in the `Authorization: Bearer <token>` header. Only `/health`, `/ready`, `/docs`, `/redoc`, and `/openapi.json` stay open. A missing, unknown, expired, or revoked token and a token of an inactive employee all receive the same `401` with `WWW-Authenticate: Bearer`; the reason (`missing`, `malformed`, `unknown`, `revoked`, `expired`, `inactive`) is written only to the API log as `auth_failed`. The header is checked before the database is opened and before the request body is validated, so an anonymous request learns nothing about the data or the body schema. The examples below read the token from the `API_TOKEN` environment variable.

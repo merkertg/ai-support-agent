@@ -270,6 +270,19 @@ def open_suggestion(screen):
     assert not screen.exception
 
 
+def choose_ticket_parties(screen, customer_id="1", product_id="1"):
+    """Выбрать существующего клиента и продукт перед вводом остальных полей."""
+    screen.selectbox(key="create_ticket_customer_choice").set_value(customer_id).run()
+    screen.selectbox(key="create_ticket_product_choice").set_value(product_id).run()
+    assert not screen.exception
+
+
+def fill_ticket_form(screen):
+    """Заполнить обязательный текст без отправки изменяющего запроса."""
+    find(screen.text_input, "Тема").set_value("Новая ошибка")
+    find(screen.text_area, "Описание проблемы").set_value("Нужна помощь")
+
+
 def test_dashboard_and_reruns_only_read(desktop):
     """Первое открытие и обновление показывают реальные агрегаты без POST."""
     screen, api = desktop
@@ -297,6 +310,7 @@ def test_ticket_create_exactly_once(desktop):
     """Создание сохраняет данные формы, а последующий rerun не создаёт дубль."""
     screen, api = desktop
     navigate(screen, "Обращения")
+    choose_ticket_parties(screen)
     find(screen.text_input, "Тема").set_value("Новая ошибка")
     find(screen.text_area, "Описание проблемы").set_value("Нужна помощь")
     find(screen.button, "Создать обращение").click().run()
@@ -317,6 +331,209 @@ def test_ticket_create_exactly_once(desktop):
     screen.run()
     assert len(api.posts) == 1
     assert screen.session_state["selected_ticket"] == "2"
+
+
+def test_ticket_creation_requires_explicit_customer_and_product(desktop):
+    """Обе записи выбираются явно; открытие страницы не подставляет первого клиента."""
+    screen, api = desktop
+    navigate(screen, "Обращения")
+    assert screen.selectbox(key="create_ticket_customer_choice").value is None
+    assert screen.selectbox(key="create_ticket_product_choice").value is None
+    assert find(screen.button, "Создать обращение").disabled
+    screen.selectbox(key="create_ticket_customer_choice").set_value("1").run()
+    assert find(screen.button, "Создать обращение").disabled
+    screen.selectbox(key="create_ticket_product_choice").set_value("1").run()
+    assert not find(screen.button, "Создать обращение").disabled
+    assert not screen.exception
+    assert api.posts == []
+
+
+def test_ticket_catalog_pages_are_independent_and_never_create_records(desktop):
+    """Клиент и продукт со второй страницы доступны без загрузки всей таблицы и POST."""
+    screen, api = desktop
+    for resource in ("customers", "products"):
+        original = api.records[resource][1]
+        api.records[resource] = {
+            record_id: {**original, "id": record_id, "name": f"Запись {record_id}"}
+            for record_id in range(1, 24)
+        }
+    navigate(screen, "Обращения")
+    screen.button(key="create_ticket_customer_next").click().run()
+    assert not screen.exception
+    assert screen.session_state["create_ticket_customer_offset"] == 20
+    assert screen.session_state["create_ticket_product_offset"] == 0
+    assert len(screen.selectbox(key="create_ticket_customer_choice").options) == 3
+    assert len(screen.selectbox(key="create_ticket_product_choice").options) == 20
+    screen.selectbox(key="create_ticket_customer_choice").set_value("23").run()
+    screen.button(key="create_ticket_product_next").click().run()
+    assert not screen.exception
+    assert screen.selectbox(key="create_ticket_customer_choice").value == "23"
+    assert screen.session_state["create_ticket_product_offset"] == 20
+    screen.selectbox(key="create_ticket_product_choice").set_value("22").run()
+    assert api.posts == []
+    assert any(read[:3] == ("list", "customers", 20) for read in api.reads)
+    assert any(read[:3] == ("list", "products", 20) for read in api.reads)
+    fill_ticket_form(screen)
+    find(screen.button, "Создать обращение").click().run()
+    assert not screen.exception
+    assert len(api.posts) == 1
+    assert api.posts[0][2]["customer_id"] == 23
+    assert api.posts[0][2]["product_id"] == 22
+    assert screen.button(key="create_ticket_customer_next").disabled
+    assert screen.button(key="create_ticket_product_next").disabled
+
+
+def test_ticket_duplicate_names_identify_exact_customer_and_product(desktop):
+    """Одинаковые названия различаются email и кодом, а API получает выбранные ID."""
+    screen, api = desktop
+    api.records["customers"][2] = {
+        **api.records["customers"][1],
+        "id": 2,
+        "email": "second@example.org",
+    }
+    api.records["products"][2] = {
+        **api.records["products"][1],
+        "id": 2,
+        "code": "server-second",
+    }
+    navigate(screen, "Обращения")
+    assert screen.selectbox(key="create_ticket_customer_choice").options == [
+        "Учебный клиент — demo@example.org",
+        "Учебный клиент — second@example.org",
+    ]
+    assert screen.selectbox(key="create_ticket_product_choice").options == [
+        "Сервер — server",
+        "Сервер — server-second",
+    ]
+    choose_ticket_parties(screen, "2", "2")
+    fill_ticket_form(screen)
+    assert api.posts == []
+    find(screen.button, "Создать обращение").click().run()
+    assert not screen.exception
+    assert len(api.posts) == 1
+    assert api.posts[0][2]["customer_id"] == 2
+    assert api.posts[0][2]["product_id"] == 2
+
+
+def test_ticket_picker_preserves_bigint_without_rounding(desktop):
+    """Предельный BIGINT передаётся целым без потери точности JavaScript-чисел."""
+    screen, api = desktop
+    record_id = 2**63 - 1
+    for resource in ("customers", "products"):
+        api.records[resource] = {
+            record_id: {**api.records[resource][1], "id": record_id}
+        }
+    navigate(screen, "Обращения")
+    choose_ticket_parties(screen, str(record_id), str(record_id))
+    fill_ticket_form(screen)
+    find(screen.button, "Создать обращение").click().run()
+    assert not screen.exception
+    assert len(api.posts) == 1
+    assert api.posts[0][2]["customer_id"] == record_id
+    assert api.posts[0][2]["product_id"] == record_id
+    assert type(api.posts[0][2]["customer_id"]) is int
+    assert type(api.posts[0][2]["product_id"]) is int
+
+
+@pytest.mark.parametrize(
+    "resource,label", [("customers", "Клиент"), ("products", "Продукт")]
+)
+def test_empty_ticket_catalog_disables_creation_with_instructions(
+    desktop, resource, label
+):
+    """Пустой справочник объясняет, где создать запись, и не допускает отправку."""
+    screen, api = desktop
+    api.records[resource] = {}
+    navigate(screen, "Обращения")
+    assert not screen.exception
+    assert find(screen.button, "Создать обращение").disabled
+    selector = find(screen.selectbox, label)
+    assert selector.value is None
+    assert selector.disabled
+    messages = [
+        item.value
+        for kind in (screen.info, screen.warning, screen.caption)
+        for item in kind
+    ]
+    assert any(
+        "Справочники" in message and "добавьте запись" in message
+        for message in messages
+    )
+    assert api.posts == []
+
+
+@pytest.mark.parametrize(
+    "resource,key", [("customers", "customer"), ("products", "product")]
+)
+def test_removed_ticket_selection_clears_without_choosing_another_record(
+    desktop, resource, key
+):
+    """Исчезнувшая запись очищает выбор и запрещает создание вместо подмены ID."""
+    screen, api = desktop
+    api.records[resource][2] = {
+        **api.records[resource][1],
+        "id": 2,
+        "name": "Другая запись",
+    }
+    navigate(screen, "Обращения")
+    choose_ticket_parties(screen)
+    del api.records[resource][1]
+    screen.run()
+    assert not screen.exception
+    assert screen.selectbox(key=f"create_ticket_{key}_choice").value is None
+    assert find(screen.button, "Создать обращение").disabled
+    assert api.posts == []
+
+
+@pytest.mark.parametrize(
+    "resource,key", [("customers", "customer"), ("products", "product")]
+)
+def test_exact_full_ticket_catalog_page_can_return_from_empty_next_page(
+    desktop, resource, key
+):
+    """Ровно 20 записей допускают пустую следующую страницу и безопасный возврат."""
+    screen, api = desktop
+    original = api.records[resource][1]
+    api.records[resource] = {
+        record_id: {**original, "id": record_id} for record_id in range(1, 21)
+    }
+    navigate(screen, "Обращения")
+    screen.selectbox(key=f"create_ticket_{key}_choice").set_value("20").run()
+    screen.button(key=f"create_ticket_{key}_next").click().run()
+    assert not screen.exception
+    assert screen.selectbox(key=f"create_ticket_{key}_choice").value is None
+    assert find(screen.button, "Создать обращение").disabled
+    assert screen.button(key=f"create_ticket_{key}_next").disabled
+    assert not screen.button(key=f"create_ticket_{key}_previous").disabled
+    screen.button(key=f"create_ticket_{key}_previous").click().run()
+    assert not screen.exception
+    assert len(screen.selectbox(key=f"create_ticket_{key}_choice").options) == 20
+    assert screen.selectbox(key=f"create_ticket_{key}_choice").value is None
+    assert screen.button(key=f"create_ticket_{key}_previous").disabled
+    assert api.posts == []
+
+
+@pytest.mark.parametrize("resource", ["customers", "products"])
+def test_unavailable_ticket_catalog_keeps_existing_tickets_accessible(
+    desktop, monkeypatch, resource
+):
+    """Ошибка загрузки списка блокирует создание, но существующее обращение читается."""
+    screen, api = desktop
+    list_records = api.list_records
+
+    def unavailable_catalog(requested_resource, *, offset=0, **filters):
+        """Отказать только в списке одного справочника, сохранив остальные GET."""
+        if requested_resource == resource:
+            raise APIError("Справочник временно недоступен.", 503)
+        return list_records(requested_resource, offset=offset, **filters)
+
+    monkeypatch.setattr(api, "list_records", unavailable_catalog)
+    open_ticket(screen)
+    assert not screen.exception
+    assert any("Справочник временно недоступен." in item.value for item in screen.error)
+    assert any(item.value == "Не запускается сервер" for item in screen.text)
+    assert ("get", "tickets", 1) in api.reads
+    assert api.posts == []
 
 
 def test_mock_analysis_once_and_persistent_history(desktop):
@@ -526,6 +743,7 @@ def test_empty_ticket_form_does_not_create_record(desktop):
     """Пустая тема или описание отклоняются до HTTP-запроса."""
     screen, api = desktop
     navigate(screen, "Обращения")
+    choose_ticket_parties(screen)
     find(screen.button, "Создать обращение").click().run()
     assert not screen.exception
     assert any("Заполните" in error.value for error in screen.error)

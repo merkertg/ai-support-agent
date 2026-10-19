@@ -1,17 +1,17 @@
 {
   "checked_at": "2026-10-19",
-  "base_commit": "8d3f1d0",
+  "base_commit": "34760aa",
   "tests": {
-    "total": 1186,
-    "unit": 1033,
+    "total": 1199,
+    "unit": 1046,
     "integration": 153,
-    "smoke_cli": 102,
+    "smoke_cli": 103,
     "skipped": 0
   },
   "checks": [
     {
       "name": "Код и комментарии",
-      "result": "Ruff без замечаний; 131 файл Python, 1570 функций/классов с docstrings."
+      "result": "Ruff без замечаний; 131 файл Python, 1582 функций/классов с docstrings."
     },
     {
       "name": "Инструкции",
@@ -19,11 +19,11 @@
     },
     {
       "name": "Покрытие",
-      "result": "92.23% строк и ветвей вместе при пороге 85%; CLI subprocess учтены; XML/JSON/HTML."
+      "result": "92.26% строк и ветвей вместе при пороге 85%; полный прогон 1199 тестов, CLI subprocess учтены."
     },
     {
       "name": "CI и платформы",
-      "result": "После исправления Windows: 1034 unit PASS, включая 103 smoke CLI. Новый результат матрицы Linux/macOS/Windows ожидается."
+      "result": "43 UI-теста PASS (12 новых); 3 workflow: actionlint PASS. Новый результат Linux/macOS/Windows ожидается."
     },
     {
       "name": "Токены и роли",
@@ -31,7 +31,7 @@
     },
     {
       "name": "Зависимости",
-      "result": "Linux audit: 88 пакетов API/UI, 0 известных уязвимостей и пропусков. 99 пакетов lock старше 14 дней."
+      "result": "Ранее: Linux audit: 88 пакетов API/UI, 0 известных уязвимостей и пропусков. 99 пакетов lock старше 14 дней."
     },
     {
       "name": "Оценки",
@@ -39,15 +39,15 @@
     },
     {
       "name": "Образы и SBOM",
-      "result": "API/UI для amd64/arm64: сборка, UID, health, Trivy PASS; 4 CycloneDX совпали с image ID после save/load."
+      "result": "Ранее: API/UI для amd64/arm64: сборка, UID, health, Trivy PASS; 4 CycloneDX совпали с image ID после save/load."
     },
     {
       "name": "Контейнерный CI",
-      "result": "Миграции, токены, review/resume, тома, UI AppTest, demo approve/reject и повтор, журнал без секретов: PASS."
+      "result": "Ранее: Миграции, токены, review/resume, тома, UI AppTest, demo approve/reject и повтор, журнал без секретов: PASS."
     },
     {
       "name": "Локальный запуск",
-      "result": "Настоящие Uvicorn/Streamlit на macOS: PASS. Нативные Windows/Linux проверяет матрица GitHub."
+      "result": "Ранее: Настоящие Uvicorn/Streamlit на macOS: PASS. Нативные Windows/Linux проверяет матрица GitHub."
     },
     {
       "name": "Очистка и подпись",
@@ -55,14 +55,15 @@
     },
     {
       "name": "Development",
-      "result": "Обновлён до 0005: 15 таблиц; прежние данные и 27 точек Qdrant сохранены; API/UI healthy, без токена 401."
+      "result": "Пересобран UI; вход и выбор через действующее API проверены. API/БД/Qdrant не пересоздавались; новых записей нет."
     }
   ],
   "remote_ci": {
-    "status": "failed",
-    "commit": "6fbe9a6763f3023b43f2615f2a09782454e18ccd",
+    "status": "running",
+    "commit": "34760aa6b8030102e6fc36a0b29270b10fc5d7df",
     "previous_user_confirmed_commit": "571538c9852133a8f5288565a86cca9393cce1fb",
-    "detail": "Журнал CI №23 для 6fbe9a6: Windows — 19 failed / 1014 passed, общий тестовый дедлайн 2 с. Исправление: 15 с и watchdog 30 с; локально 1034 unit PASS. Полный прогон 1186 и 92.23% выше предшествует исправлению. Для нового SHA нужны все 8 выполнений, GHCR и SBOM. Подпись выключена."
+    "detail": "Последний сообщённый пользователем статус CI для 34760aa: ещё выполняется. Новый код проверен локально: 1199 тестов; удалённый результат нового SHA не подтверждён. Нужны 8 выполнений, GHCR и SBOM. Публичная подпись выключена.",
+    "previous_failed_commit": "6fbe9a6763f3023b43f2615f2a09782454e18ccd"
   },
   "changes": [
     "Завершены токены сотрудников, роли и лимит изменений; автор решения берётся из проверенного токена.",
@@ -70,10 +71,11 @@
     "Очистка GHCR сохраняет все нужные связи, останавливается при 404 и повторно проверяет версии перед удалением.",
     "Четыре архитектурных образа, SBOM и полный аутентифицированный Docker-сценарий проверены.",
     "Публичная подпись выключена по выбору пользователя; стенд обновлён, одобренный локальный администратор создан.",
-    "Исправлен дедлайн Windows smoke-тестов; добавлен медленный HTTP-сценарий, короткий тайм-аут проверяется отдельно."
+    "Исправлен дедлайн Windows smoke-тестов; добавлен медленный HTTP-сценарий, короткий тайм-аут проверяется отдельно.",
+    "Создание обращения: выбор клиента и продукта по имени, независимые страницы и проверка пустого/исчезнувшего выбора; 12 новых UI-тестов."
   ],
   "remaining": [
-    "Подтвердить новый GitHub Actions после сбоя Windows 6fbe9a6: 8 выполнений, оба пакета amd64/arm64 и SBOM; затем первый dry-run очистки и PR зависимостей.",
+    "Подтвердить Actions нового SHA: 8 выполнений, оба пакета amd64/arm64 и SBOM; затем первый dry-run очистки и PR зависимостей.",
     "SSO, общий лимит нескольких worker и внешний TLS остаются отдельным расширением; локальный вход администратора уже подготовлен.",
     "Публичная подпись выключена; GHCR_PUBLIC_SIGNING=true включает её и раскрытие metadata в Rekor.",
     "Mock остаётся по выбору пользователя. Реальная модель, внешняя доставка и серверный deploy не проверялись и не настроены."
@@ -88,14 +90,14 @@
     "agent_total": 12
   },
   "coverage": {
-    "combined_percent": 92.23,
-    "line_percent": 93.91,
-    "branch_percent": 85.69,
+    "combined_percent": 92.26,
+    "line_percent": 93.93,
+    "branch_percent": 85.75,
     "minimum_combined_percent": 85,
-    "covered_lines": 5131,
-    "statements": 5464,
-    "covered_branches": 1198,
-    "branches": 1398,
+    "covered_lines": 5152,
+    "statements": 5485,
+    "covered_branches": 1204,
+    "branches": 1404,
     "subprocess": true
   },
   "bootstrap": {
@@ -117,5 +119,34 @@
     "process_timeout_seconds": 30,
     "production_timeouts_changed": false,
     "previous_full_run_retained": true
+  },
+  "previous_full_run": {
+    "base_commit": "8d3f1d0",
+    "tests": {
+      "total": 1186,
+      "unit": 1033,
+      "integration": 153,
+      "smoke_cli": 102,
+      "skipped": 0
+    },
+    "coverage": {
+      "combined_percent": 92.23,
+      "line_percent": 93.91,
+      "branch_percent": 85.69,
+      "minimum_combined_percent": 85,
+      "covered_lines": 5131,
+      "statements": 5464,
+      "covered_branches": 1198,
+      "branches": 1398,
+      "subprocess": true
+    }
+  },
+  "ui_name_selection": {
+    "ui_tests_passed": 43,
+    "new_cases": 12,
+    "page_size": 20,
+    "live_container_check": true,
+    "development_data_mutated": false,
+    "production_api_changed": false
   }
 }
