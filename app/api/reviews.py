@@ -6,6 +6,12 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import ApiSession
 from app.api.routes import FilterId, Limit, Offset, ResourceId
+from app.api.security import (
+    AUTH_RESPONSES,
+    WRITE_RESPONSES,
+    ReviewerWriter,
+    get_principal,
+)
 from app.schemas.resources import ErrorRead
 from app.schemas.reviews import (
     ReviewRequest,
@@ -19,7 +25,12 @@ from app.workflow import service as workflow
 from app.workflow.checkpoint import get_checkpointer
 from app.workflow.service import CheckpointerFactory
 
-router = APIRouter(prefix="/api", tags=["Review"])
+router = APIRouter(
+    prefix="/api",
+    tags=["Review"],
+    dependencies=[Depends(get_principal)],
+    responses=AUTH_RESPONSES,
+)
 
 
 def get_checkpointer_factory() -> CheckpointerFactory:
@@ -56,7 +67,8 @@ def get_suggestion(
 @router.post(
     "/suggestions/{resource_id}/review",
     response_model=ReviewResultRead,
-    responses={
+    responses=WRITE_RESPONSES
+    | {
         404: {
             "model": ErrorRead,
             "description": "Предложение или сотрудник не найдены",
@@ -68,6 +80,7 @@ def get_suggestion(
 def review_suggestion(
     resource_id: ResourceId,
     payload: ReviewRequest,
+    reviewer: ReviewerWriter,
     session: ApiSession,
     checkpointer_factory: Annotated[
         CheckpointerFactory, Depends(get_checkpointer_factory)
@@ -75,11 +88,13 @@ def review_suggestion(
 ) -> ReviewResultRead:
     """Одобрить или отклонить предложение и продолжить граф LangGraph.
 
-    Одобрение создаёт сообщение обращения от имени сотрудника (учебная
-    доставка, письмо не отправляется) и переводит обращение в waiting_customer.
+    Решение принимает сотрудник с ролью reviewer или admin; автор берётся
+    из токена запроса, а не из тела. Одобрение создаёт сообщение обращения
+    от его имени (учебная доставка, письмо не отправляется) и переводит
+    обращение в waiting_customer.
     """
     return workflow.review_suggestion(
-        session, resource_id, payload, checkpointer_factory
+        session, resource_id, payload, checkpointer_factory, reviewer.user_id
     )
 
 

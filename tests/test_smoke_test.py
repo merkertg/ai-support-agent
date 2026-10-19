@@ -1,6 +1,7 @@
 """Проверить CLI smoke-теста на настоящем локальном HTTP-сервере."""
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -14,6 +15,22 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test.py"
+# Вымышленные токены: администратор smoke и учебный оператор, выданный им.
+TOKEN = "asa_" + "s" * 43
+OPERATOR_TOKEN = "asa_" + "o" * 43
+# Служебный ключ сценария: какие токены фиктивный сервер принимает и с какой ролью.
+TOKENS = "__tokens__"
+# Пути, которые сломанный сервер сценария обслуживает без токена.
+OPEN_PATHS = "__open__"
+ME = {
+    "id": 41,
+    "name": "Smoke admin",
+    "email": "smoke-admin@example.com",
+    "role": "admin",
+    "token_id": 60,
+    "token_name": "ci-smoke",
+    "token_expires_at": "2026-10-20T00:00:00Z",
+}
 
 
 KNOWLEDGE_STATUS = {
@@ -74,6 +91,7 @@ def valid_responses(
     check_database = check_database or check_api
     paths = {"/health": {"get": {}}}
     if check_api:
+        paths["/api/auth/me"] = {"get": {}}
         for resource in ("customers", "products", "licenses", "tickets"):
             paths[f"/api/{resource}"] = {"get": {}, "post": {}}
             paths[f"/api/{resource}/{{id}}"] = {"get": {}}
@@ -109,6 +127,8 @@ def valid_responses(
     if check_database:
         responses["/ready"] = (200, b'{"status": "ok", "database": "ok"}')
     if check_api:
+        responses[TOKENS] = {TOKEN: "admin"}
+        responses["/api/auth/me"] = (200, json.dumps(ME).encode())
         for resource in ("customers", "products", "licenses", "tickets"):
             responses[f"/api/{resource}?limit=1"] = (200, b"[]")
     if check_llm:
@@ -167,6 +187,8 @@ def valid_responses(
 REVIEW_TEXT = "Smoke: ответ проверен и одобрен оператором."
 REVIEW_PATHS = {
     "/api/users": {"get": {}, "post": {}},
+    "/api/users/{resource_id}/tokens": {"get": {}, "post": {}},
+    "/api/tokens/{resource_id}": {"delete": {}},
     "/api/agent-runs/{resource_id}/workflow": {"get": {}},
     "/api/suggestions/{resource_id}/review": {"post": {}},
 }
@@ -206,9 +228,26 @@ def review_result(reviewer_id: int) -> dict:
 def add_review_responses(
     responses: dict, result: dict | None = None, repeat_status: int = 409
 ) -> None:
-    """Первое решение одобряет, повторное получает 409; затем обращение ждёт клиента."""
+    """Первое решение одобряет, повторное получает 409; затем обращение ждёт клиента.
+
+    Выдача токена оператору регистрирует его в фиктивном сервере, отзыв —
+    удаляет: так smoke видит 403 для роли operator и 401 после отзыва.
+    """
     state = {"reviewed": False}
+    tokens = responses.setdefault(TOKENS, {TOKEN: "admin"})
     open_ticket = responses.get("/api/tickets/13", (200, b'{"id":13,"status":"open"}'))
+
+    def issue(body: dict) -> tuple[int, bytes]:
+        """Выдать учебному оператору токен на один день."""
+        tokens[OPERATOR_TOKEN] = "operator"
+        return 201, json.dumps(
+            {"id": 61, "user_id": 42, "name": body["name"], "token": OPERATOR_TOKEN}
+        ).encode()
+
+    def revoke(body: dict) -> tuple[int, bytes]:
+        """Отозвать токен оператора: следующий запрос с ним получит 401."""
+        tokens.pop(OPERATOR_TOKEN, None)
+        return 200, b'{"id":61,"revoked_at":"2026-10-19T00:00:00Z"}'
 
     def ticket(body: dict) -> tuple[int, bytes]:
         """Показать статус обращения до и после доставки ответа."""
@@ -218,7 +257,7 @@ def add_review_responses(
 
     def review(body: dict) -> tuple[int, bytes]:
         """Применить решение один раз, как advisory lock и FOR UPDATE в API."""
-        value = result if result is not None else review_result(body["reviewer_id"])
+        value = result if result is not None else review_result(ME["id"])
         if state["reviewed"] and repeat_status == 409:
             # Smoke проверяет только код 409; текст ошибки здесь не важен.
             return 409, b'{"detail":"conflict"}'
@@ -227,7 +266,9 @@ def add_review_responses(
 
     responses.update(
         {
-            "/api/users": (201, b'{"id":41}'),
+            "/api/users": (201, b'{"id":42}'),
+            "/api/users/42/tokens": issue,
+            "/api/tokens/61": revoke,
             "/api/agent-runs/21/workflow": (200, json.dumps(WAITING).encode()),
             "/api/suggestions/31/review": review,
             "/api/tickets/13": ticket,
@@ -292,8 +333,14 @@ def agent_run() -> dict:
 
 @contextmanager
 def http_server(responses: dict[str, tuple[int, bytes]]):
-    """Запустить изолированный HTTP-сервер и гарантированно закрыть его."""
+    """Запустить изолированный HTTP-сервер и гарантированно закрыть его.
+
+    Маршруты /api/* требуют известный токен, как настоящее API: без него 401,
+    а решение по предложению с токеном роли operator получает 403.
+    """
     requests = Counter()
+    tokens = responses.get(TOKENS, {})
+    open_paths = responses.get(OPEN_PATHS, set())
 
     class Handler(BaseHTTPRequestHandler):
         """Выдать ответы сценария и посчитать реальные HTTP-запросы."""
@@ -302,6 +349,13 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
             """Выдать ответ сценария; функция-ответ получает JSON тела POST."""
             requests[self.path] += 1
             value = responses.get(self.path, (404, b"Not found"))
+            if self.path.startswith("/api/") and self.path not in open_paths:
+                header = self.headers.get("Authorization", "")
+                role = tokens.get(header.removeprefix("Bearer "))
+                if role is None:
+                    value = (401, b'{"detail":"token required"}')
+                elif role == "operator" and self.path.endswith("/review"):
+                    value = (403, b'{"detail":"forbidden"}')
             status, body = value(payload or {}) if callable(value) else value
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
@@ -316,6 +370,10 @@ def http_server(responses: dict[str, tuple[int, bytes]]):
             """Принять тело POST и выдать отдельный ответ сценария без реальной БД."""
             raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             self.respond(json.loads(raw) if raw else None)
+
+        def do_DELETE(self) -> None:
+            """Обработать отзыв токена тем же сценарием, что GET и POST."""
+            self.respond()
 
         def log_message(self, format: str, *args) -> None:
             """Не засорять вывод Pytest служебными логами фиктивного сервера."""
@@ -342,8 +400,12 @@ def run_smoke(
     check_knowledge: bool = False,
     check_review: bool = False,
     review_run: int | None = None,
+    token: str | None = TOKEN,
 ) -> subprocess.CompletedProcess:
-    """Вызвать CLI отдельным процессом с ограничением времени самого теста."""
+    """Вызвать CLI отдельным процессом с ограничением времени самого теста.
+
+    Токен передаётся только через окружение API_TOKEN, как в CI.
+    """
     command = [sys.executable, str(SCRIPT), "--base-url", url, "--timeout", timeout]
     if check_database:
         command.append("--check-database")
@@ -359,14 +421,23 @@ def run_smoke(
         command.append("--check-review")
     if review_run is not None:
         command.extend(["--review-run", str(review_run)])
+    environment = {key: value for key, value in os.environ.items()}
+    environment.pop("API_TOKEN", None)
+    if token is not None:
+        environment["API_TOKEN"] = token
     # Дочерний CLI печатает UTF-8 на любой ОС; Windows по умолчанию читал бы cp1252.
-    return subprocess.run(
+    result = subprocess.run(
         command,
         capture_output=True,
         encoding="utf-8",
         check=False,
         timeout=5,
+        env=environment,
     )
+    # Ни один режим не печатает токены сотрудников.
+    for secret in (TOKEN, OPERATOR_TOKEN):
+        assert secret not in result.stdout + result.stderr
+    return result
 
 
 def test_cli_accepts_working_api() -> None:
@@ -496,8 +567,13 @@ def test_cli_accepts_business_api_and_requires_readiness() -> None:
     with http_server(responses) as (url, requests):
         result = run_smoke(url, check_api=True)
     assert result.returncode == 0, result.stderr
-    assert requests == Counter({endpoint: 1 for endpoint in responses})
+    expected = Counter({endpoint: 1 for endpoint in responses if endpoint != TOKENS})
+    # Первый запрос списка клиентов — без токена: API обязан ответить 401.
+    expected["/api/customers?limit=1"] = 2
+    assert requests == expected
     assert "OK /ready" in result.stdout
+    assert "OK /api/customers без токена: HTTP 401" in result.stdout
+    assert "OK /api/auth/me: сотрудник №41, роль admin" in result.stdout
     assert "OK /api/tickets?limit=1" in result.stdout
 
 
@@ -556,8 +632,10 @@ def test_cli_checks_mock_draft_and_unchanged_ticket() -> None:
     with http_server(responses) as (url, requests):
         result = run_smoke(url, check_llm=True)
     assert result.returncode == 0, result.stderr
-    assert requests == Counter({endpoint: 1 for endpoint in responses})
-    assert sum(requests.values()) == 14
+    expected = Counter({endpoint: 1 for endpoint in responses if endpoint != TOKENS})
+    expected["/api/customers?limit=1"] = 2
+    assert requests == expected
+    assert sum(requests.values()) == 16
     assert "обращение не изменилось" in result.stdout
 
 
@@ -632,7 +710,8 @@ def test_cli_checks_saved_agent_run_and_unchanged_ticket() -> None:
     assert result.returncode == 0, result.stderr
     # Обращение читается дважды: после черновика и после анализа агентом;
     # поиск — дважды: для продукта и для проверки фильтра другого продукта.
-    expected = Counter({endpoint: 1 for endpoint in responses})
+    expected = Counter({endpoint: 1 for endpoint in responses if endpoint != TOKENS})
+    expected["/api/customers?limit=1"] = 2
     expected["/api/tickets/13"] = 2
     expected["/api/knowledge/search"] = 2
     assert requests == expected
@@ -821,9 +900,16 @@ def test_cli_checks_review_delivery_and_conflict() -> None:
     with http_server(responses) as (url, requests):
         result = run_smoke(url, check_review=True)
     assert result.returncode == 0, result.stderr
-    assert requests["/api/suggestions/31/review"] == 2
-    assert requests["/api/agent-runs/21/workflow"] == 1
+    # Без токена (401), с ролью operator (403), одобрение и повтор (409).
+    assert requests["/api/suggestions/31/review"] == 4
+    assert requests["/api/agent-runs/21/workflow"] == 2
     assert requests["/api/users"] == 1
+    assert requests["/api/users/42/tokens"] == 1
+    assert requests["/api/tokens/61"] == 1
+    # Свой токен и отозванный токен оператора.
+    assert requests["/api/auth/me"] == 2
+    assert "роль operator получает 403" in result.stdout
+    assert "отозванный токен получает 401" in result.stdout
     # Обращение: после черновика, после анализа и после доставки ответа.
     assert requests["/api/tickets/13"] == 3
     assert "повторное решение получает 409" in result.stdout
@@ -886,11 +972,15 @@ def test_cli_review_run_continues_existing_workflow() -> None:
     schema["paths"].update(REVIEW_PATHS)
     responses["/openapi.json"] = (200, json.dumps(schema).encode())
     add_review_responses(responses)
+    responses[TOKENS][TOKEN] = "reviewer"
+    responses["/api/auth/me"] = (200, json.dumps(ME | {"role": "reviewer"}).encode())
     with http_server(responses) as (url, requests):
         result = run_smoke(url, review_run=21)
     assert result.returncode == 0, result.stderr
     assert requests["/api/tickets/13/analyze"] == 0
+    # Существующий запуск рецензент решает без проверки ролей и выдачи токенов.
     assert requests["/api/suggestions/31/review"] == 2
+    assert requests["/api/users"] == 0
 
 
 @pytest.mark.parametrize("value", ["0", "-3", "abc"])
@@ -899,3 +989,116 @@ def test_cli_rejects_invalid_review_run_id(value: str) -> None:
     command = [sys.executable, str(SCRIPT), "--review-run", value]
     result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=5)
     assert result.returncode == 2
+
+
+def test_cli_requires_token_for_api_modes() -> None:
+    """Без API_TOKEN режимы /api/* завершаются до первого HTTP-запроса."""
+    with http_server(valid_responses(check_api=True)) as (url, requests):
+        result = run_smoke(url, check_api=True, token=None)
+    assert result.returncode == 1
+    assert "API_TOKEN" in result.stderr
+    assert requests == Counter()
+
+
+def test_cli_basic_mode_does_not_need_token() -> None:
+    """/health, /docs и /openapi.json открыты: токен для них не нужен."""
+    with http_server(valid_responses()) as (url, _):
+        result = run_smoke(url, token=None)
+    assert result.returncode == 0, result.stderr
+
+
+def test_cli_rejects_api_that_answers_without_token() -> None:
+    """Открытое без токена API блокирует выпуск образа."""
+    responses = valid_responses(check_api=True)
+    responses[TOKENS][""] = "admin"
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 1
+    assert "без токена не получил 401" in result.stderr
+    assert requests["/api/auth/me"] == 0
+
+
+@pytest.mark.parametrize("change", [{"role": "superuser"}, {"id": 0}, {"id": "41"}])
+def test_cli_rejects_wrong_current_staff(change: dict) -> None:
+    """Неверный ответ /api/auth/me останавливает проверку до чтения данных."""
+    responses = valid_responses(check_api=True)
+    responses["/api/auth/me"] = (200, json.dumps(ME | change).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_api=True)
+    assert result.returncode == 1
+    assert "неверный сотрудник токена" in result.stderr
+    assert requests["/api/tickets?limit=1"] == 0
+
+
+def test_cli_review_check_requires_admin_token() -> None:
+    """--check-review создаёт оператора и токен: без роли admin он не начинается."""
+    responses = valid_responses(check_review=True)
+    responses["/api/auth/me"] = (200, json.dumps(ME | {"role": "reviewer"}).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 1
+    assert "роли admin" in result.stderr
+    assert requests["/api/users"] == 0
+    assert requests["/api/suggestions/31/review"] == 0
+
+
+def test_cli_review_run_refuses_operator_token() -> None:
+    """Решение по существующему запуску требует роль reviewer или admin."""
+    responses = valid_responses(check_api=True)
+    responses["/api/agent-runs/21"] = (200, json.dumps(agent_run()).encode())
+    schema = json.loads(responses["/openapi.json"][1])
+    schema["paths"].update(REVIEW_PATHS)
+    responses["/openapi.json"] = (200, json.dumps(schema).encode())
+    add_review_responses(responses)
+    responses["/api/auth/me"] = (200, json.dumps(ME | {"role": "operator"}).encode())
+    with http_server(responses) as (url, requests):
+        result = run_smoke(url, review_run=21)
+    assert result.returncode == 1
+    assert "reviewer или admin" in result.stderr
+    assert requests["/api/suggestions/31/review"] == 0
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        ("operator_allowed", "роль operator не получила 403"),
+        ("revocation_ignored", "Отозванный токен по-прежнему принимается"),
+        ("anonymous_allowed", "решение без токена не получило 401"),
+        ("token_missing", "токен не выдан"),
+        ("not_revoked", "токен не отозван"),
+    ],
+)
+def test_cli_rejects_broken_review_authorization(defect: str, message: str) -> None:
+    """Любая дыра в проверке ролей и токенов решения блокирует выпуск образа."""
+    responses = valid_responses(check_review=True)
+    tokens = responses[TOKENS]
+    issue, revoke = responses["/api/users/42/tokens"], responses["/api/tokens/61"]
+
+    def issue_admin(body: dict) -> tuple[int, bytes]:
+        """Выдать оператору токен с правами администратора: 403 не будет."""
+        result = issue(body)
+        tokens[OPERATOR_TOKEN] = "admin"
+        return result
+
+    def revoke_without_effect(body: dict) -> tuple[int, bytes]:
+        """Ответить успехом отзыва, но оставить токен действующим."""
+        result = revoke(body)
+        tokens[OPERATOR_TOKEN] = "operator"
+        return result
+
+    if defect == "operator_allowed":
+        responses["/api/users/42/tokens"] = issue_admin
+    elif defect == "revocation_ignored":
+        responses["/api/tokens/61"] = revoke_without_effect
+    elif defect == "anonymous_allowed":
+        responses[OPEN_PATHS] = {"/api/suggestions/31/review"}
+    elif defect == "token_missing":
+        responses["/api/users/42/tokens"] = lambda body: (201, b'{"id":61}')
+    else:
+        responses["/api/tokens/61"] = lambda body: (200, b'{"id":61}')
+    with http_server(responses) as (url, _):
+        result = run_smoke(url, check_review=True)
+    assert result.returncode == 1
+    assert message in result.stderr
+    # Проверка ролей идёт до решения от имени сотрудника API_TOKEN.
+    assert "одобрено от имени" not in result.stdout

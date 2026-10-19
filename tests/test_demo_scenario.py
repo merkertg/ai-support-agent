@@ -12,17 +12,21 @@ import pytest
 
 from scripts import demo_scenario as demo
 
+# Вымышленный токен сотрудника; FakeClient проверяет только роль из /api/auth/me.
+TOKEN = "asa_" + "d" * 43
+STAFF_ID = 77
+
 
 class FakeClient(demo.DemoClient):
     """Смоделировать HTTP-контракт API и подсчитать каждое изменение данных."""
 
     def __init__(self):
         """Создать отдельную память сценария без PostgreSQL, Qdrant и сети."""
-        super().__init__("http://127.0.0.1:8001", time.monotonic() + 60)
+        super().__init__("http://127.0.0.1:8001", time.monotonic() + 60, TOKEN)
         self.calls = []
+        self.role = "reviewer"
         self.tables = {
-            name: []
-            for name in ("customers", "products", "users", "licenses", "tickets")
+            name: [] for name in ("customers", "products", "licenses", "tickets")
         }
         self.runs = []
         self.suggestions = {}
@@ -47,6 +51,8 @@ class FakeClient(demo.DemoClient):
         query = {key: values[0] for key, values in parse_qs(split.query).items()}
         if endpoint == "/ready":
             return {"status": "ok", "database": "ok"}
+        if endpoint == "/api/auth/me":
+            return {"id": STAFF_ID, "name": "Учебный рецензент", "role": self.role}
         if endpoint == "/api/llm/status":
             return {"provider": self.llm_provider, "configured": True}
         if endpoint == "/api/knowledge/status":
@@ -61,8 +67,6 @@ class FakeClient(demo.DemoClient):
         if resource in self.tables and len(parts) == 2:
             if payload is not None:
                 record = {"id": self.new_id(), **payload}
-                if resource == "users":
-                    record["is_active"] = True
                 if resource == "tickets":
                     record["status"] = "open"
                 self.tables[resource].append(record)
@@ -154,7 +158,9 @@ class FakeClient(demo.DemoClient):
         assert suggestion["status"] == "pending", "Повтор решения запрещён"
         decision = payload["decision"]
         suggestion["status"] = "approved" if decision == "approve" else "rejected"
-        suggestion["reviewed_by"] = payload["reviewer_id"]
+        # Автора решения API берёт из токена; в теле его быть не должно.
+        assert "reviewer_id" not in payload
+        suggestion["reviewed_by"] = STAFF_ID
         run = next(run for run in self.runs if run["suggestion"]["id"] == suggestion_id)
         state = "delivered" if decision == "approve" else "rejected"
         self.workflows[run["id"]]["state"] = state
@@ -163,7 +169,7 @@ class FakeClient(demo.DemoClient):
                 "id": self.new_id(),
                 "ticket_id": suggestion["ticket_id"],
                 "author_type": "operator",
-                "user_id": payload["reviewer_id"],
+                "user_id": STAFF_ID,
                 "content": payload["final_content"],
             }
             self.messages.append(message)
@@ -184,7 +190,8 @@ def test_default_demo_is_idempotent_and_leaves_pending():
     count = len(writes(client))
     second = demo.run_demo(client)
     assert first == second
-    assert count == len(writes(client)) == 6
+    assert count == len(writes(client)) == 5
+    assert first["staff_id"] == STAFF_ID
     assert first["suggestion_status"] == "pending"
     assert first["workflow_state"] == "awaiting_review"
     assert len(client.tables["tickets"]) == len(client.runs) == 1
@@ -199,7 +206,8 @@ def test_review_paths_are_separate_and_idempotent():
     count = len(writes(client))
     second = demo.run_demo(client, check_review=True)
     assert first == second
-    assert len(writes(client)) == count == 12
+    assert len(writes(client)) == count == 11
+    assert first["review_checks"]["approve"]["status"] == "approved"
     assert first["suggestion_status"] == "pending"
     assert first["review_checks"]["approve"]["messages"] == 1
     assert first["review_checks"]["reject"]["messages"] == 0
@@ -307,10 +315,11 @@ def test_post_network_error_is_not_retried(monkeypatch):
             raise URLError(f"internal {demo.LICENSE_KEY}")
 
     monkeypatch.setattr(demo, "build_opener", lambda *args: BrokenOpener())
-    client = demo.DemoClient("http://localhost", time.monotonic() + 60)
+    client = demo.DemoClient("http://localhost", time.monotonic() + 60, TOKEN)
     with pytest.raises(demo.DemoError) as error:
         client.object("/api/licenses", payload={"license_key": demo.LICENSE_KEY})
     assert len(calls) == 1
+    assert calls[0].get_header("Authorization") == f"Bearer {TOKEN}"
     assert demo.LICENSE_KEY not in str(error.value)
 
 
@@ -331,7 +340,7 @@ def test_http_error_does_not_expose_response_or_credentials(monkeypatch):
             )
 
     monkeypatch.setattr(demo, "build_opener", lambda *args: BrokenOpener())
-    client = demo.DemoClient("http://localhost", time.monotonic() + 60)
+    client = demo.DemoClient("http://localhost", time.monotonic() + 60, TOKEN)
     with pytest.raises(demo.DemoError) as error:
         client.object("/api/licenses", payload={"license_key": demo.LICENSE_KEY})
     assert "409" in str(error.value)
@@ -347,7 +356,78 @@ def test_cli_failure_is_safe_and_returns_nonzero(monkeypatch, capsys):
         raise demo.DemoError("Индекс не готов")
 
     monkeypatch.setattr(demo, "run_demo", fail)
+    monkeypatch.setenv("API_TOKEN", TOKEN)
     assert demo.main([]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "Демо: Индекс не готов\n"
+
+
+def test_cli_requires_token_before_any_request(monkeypatch, capsys):
+    """Без API_TOKEN сценарий объясняет, как получить токен, и не обращается к API."""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.setattr(demo, "run_demo", lambda *args, **kwargs: pytest.fail())
+    assert demo.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "API_TOKEN" in captured.err
+
+
+def test_cli_prints_ids_but_never_token(monkeypatch, capsys):
+    """Успешный запуск печатает JSON идентификаторов без токена сотрудника."""
+    monkeypatch.setenv("API_TOKEN", f"  {TOKEN}  ")
+    seen = []
+
+    def succeed(client, *, check_review):
+        """Запомнить токен клиента и вернуть итог без сети."""
+        seen.append(client.token)
+        return {"staff_id": STAFF_ID}
+
+    monkeypatch.setattr(demo, "run_demo", succeed)
+    assert demo.main(["--verify-review"]) == 0
+    captured = capsys.readouterr()
+    assert seen == [TOKEN]
+    assert json.loads(captured.out) == {"staff_id": STAFF_ID}
+    assert TOKEN not in captured.out + captured.err
+
+
+def test_review_check_requires_reviewer_role():
+    """Токен оператора годится для подготовки, но не для --verify-review."""
+    client = FakeClient()
+    client.role = "operator"
+    assert demo.run_demo(client)["suggestion_status"] == "pending"
+    count = len(writes(client))
+    with pytest.raises(demo.DemoError, match="reviewer или admin"):
+        demo.run_demo(client, check_review=True)
+    assert len(writes(client)) == count
+
+
+def test_unknown_staff_role_stops_before_writes():
+    """Неизвестная роль из /api/auth/me останавливает сценарий до POST."""
+    client = FakeClient()
+    client.role = "superuser"
+    with pytest.raises(demo.DemoError, match="неизвестную роль"):
+        demo.run_demo(client)
+    assert not writes(client)
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [(401, "API_TOKEN"), (403, "роль"), (429, "лимит"), (500, "проверь API")],
+)
+def test_http_errors_explain_authentication_and_limits(monkeypatch, code, hint):
+    """401, 403 и 429 получают подсказку, остальные коды — общую."""
+
+    class Rejecting:
+        """Вернуть отказ API с заданным кодом."""
+
+        def open(self, request, timeout):
+            """Сымитировать ответ сервера без тела."""
+            raise HTTPError("http://api", code, "denied", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(demo, "build_opener", lambda *args: Rejecting())
+    client = demo.DemoClient("http://localhost", time.monotonic() + 60, TOKEN)
+    with pytest.raises(demo.DemoError) as error:
+        client.object("/api/auth/me")
+    assert f"HTTP {code}" in str(error.value) and hint in str(error.value)
+    assert TOKEN not in str(error.value)

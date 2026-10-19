@@ -14,6 +14,6 @@ NAMING_CONVENTION = {
 
 
 class Base(DeclarativeBase):
-    """Объединяет метаданные девяти таблиц; не создаёт таблицы автоматически."""
+    """Объединяет метаданные таблиц проекта; не создаёт таблицы автоматически."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)

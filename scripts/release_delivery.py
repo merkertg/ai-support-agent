@@ -4,7 +4,9 @@
 а общий тег (`sha-…`, `latest`, `vX.Y.Z`) — это image index обеих архитектур:
 `docker pull` выбирает нужную сам. Версионные ссылки проверяются до первой
 записи в registry: чужую версию не перезаписываем, повтор идентичного образа
-разрешаем. Секреты читаются только из окружения; команды Docker получают
+разрешаем. После публикации cosign keyless подписывает digest index из отчёта
+и прикладывает к manifest каждой архитектуры SBOM того же проверенного образа.
+Секреты читаются только из окружения; команды Docker и cosign получают
 отдельные аргументы без shell.
 """
 
@@ -37,6 +39,12 @@ IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 REPOSITORY = re.compile(r"[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*")
+# Имя из GITHUB_REPOSITORY сохраняет регистр: так оно записано в сертификате.
+GITHUB_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Keyless-подпись: сертификат Fulcio выдаётся по OIDC-токену этого workflow.
+OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+WORKFLOW_PATH = ".github/workflows/ci.yml"
+SBOM_IMAGE_ID = "aquasecurity:trivy:ImageID"
 MANIFEST_TYPES = (
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -248,13 +256,18 @@ class Registry:
 
     host = "ghcr.io"
 
-    def __init__(self, actor: str, token: str) -> None:
-        """Создать HTTPS-клиент; отсутствие credentials блокирует публикацию."""
+    def __init__(self, actor: str, token: str, *, scope: str = "pull,push") -> None:
+        """Создать HTTPS-клиент; отсутствие credentials блокирует публикацию.
+
+        Очистке пакетов достаточно scope `pull`: она читает manifest, а версии
+        удаляет через REST API GitHub.
+        """
         if not actor or not token:
             raise DeliveryError("Для GHCR нужны GITHUB_ACTOR и GITHUB_TOKEN")
         self.authorization = (
             "Basic " + base64.b64encode(f"{actor}:{token}".encode()).decode()
         )
+        self.scope = scope
         self.tokens: dict[str, str] = {}
         self.opener = build_opener(NoRedirect())
 
@@ -293,7 +306,7 @@ class Registry:
         """Прочитать manifest или index по тегу либо digest; None — только 404."""
         if repository not in self.tokens:
             query = urlencode(
-                {"service": "ghcr.io", "scope": f"repository:{repository}:pull,push"}
+                {"service": "ghcr.io", "scope": f"repository:{repository}:{self.scope}"}
             )
             response = self.request(
                 f"https://ghcr.io/token?{query}", self.authorization
@@ -450,6 +463,19 @@ def publish_images(
         latest = (
             "пропущен для релизного тега" if version else "пропущен: main уже изменён"
         )
+        item = {
+            "component": component,
+            "image": f"{host}/{remote}:{tag}",
+            "digest": f"{host}/{remote}@{index}",
+            "platforms": {
+                arch: f"{host}/{remote}@{digests[arch]}" for arch in PLATFORMS
+            },
+            # Manifest, на которые ссылается index: к ним прикладывается SBOM.
+            "manifests": {
+                arch: f"{host}/{remote}@{children[arch]}" for arch in PLATFORMS
+            },
+            "tested": {arch: images[COMPONENTS[component][arch]] for arch in PLATFORMS},
+        }
         if not version and main_sha == commit:
             command(
                 "docker",
@@ -460,20 +486,204 @@ def publish_images(
                 f"{host}/{remote}:latest",
                 *sources,
             )
-            if verified_index(registry, remote, "latest", children) is None:
+            latest_index = verified_index(registry, remote, "latest", children)
+            if latest_index is None:
                 raise DeliveryError(f"latest для {remote} не появился после записи")
             latest = "опубликован и проверен"
-        report.append(
+            # Обычно совпадает с digest SHA-index; иначе подписываются оба.
+            item["latest_digest"] = f"{host}/{remote}@{latest_index}"
+        item["latest"] = latest
+        report.append(item)
+    return report
+
+
+def digest_reference(value: object, host: str, remote: str) -> str:
+    """Принять только адрес `host/remote@sha256:…` нужного пакета, без тега."""
+    prefix = f"{host}/{remote}@"
+    if (
+        not isinstance(value, str)
+        or not value.startswith(prefix)
+        or not IMAGE_ID.fullmatch(value.removeprefix(prefix))
+    ):
+        raise DeliveryError(f"Отчёт публикации содержит неверный digest {remote}")
+    return value
+
+
+def signing_targets(report: object, repository: str, *, host: str = "ghcr.io"):
+    """Проверить отчёт publish и вернуть, что подписывать для API и UI.
+
+    Подписываются digest index (и `latest`, если его digest другой), SBOM
+    прикладывается к manifest архитектуры. Теги в подпись не попадают: тег
+    можно переписать, digest — нет.
+    """
+    repository = repository.lower()
+    if not REPOSITORY.fullmatch(repository) or len(repository) > 250:
+        raise DeliveryError("Неверное имя GitHub-репозитория для GHCR")
+    targets = {"api": repository, "ui": repository + "-ui"}
+    if (
+        not isinstance(report, list)
+        or len(report) != len(targets)
+        or {item.get("component") for item in report if isinstance(item, dict)}
+        != set(targets)
+    ):
+        raise DeliveryError("Отчёт публикации должен описывать ровно API и UI")
+    result = []
+    for item in sorted(report, key=lambda entry: entry["component"]):
+        component = item["component"]
+        remote = targets[component]
+        indexes = [digest_reference(item.get("digest"), host, remote)]
+        if "latest_digest" in item:
+            latest = digest_reference(item["latest_digest"], host, remote)
+            if latest not in indexes:
+                indexes.append(latest)
+        manifests, tested = item.get("manifests"), item.get("tested")
+        if (
+            not isinstance(manifests, dict)
+            or not isinstance(tested, dict)
+            or set(manifests) != set(PLATFORMS)
+            or set(tested) != set(PLATFORMS)
+            or any(
+                not isinstance(value, str) or not IMAGE_ID.fullmatch(value)
+                for value in tested.values()
+            )
+        ):
+            raise DeliveryError(f"Отчёт публикации {remote} без manifest архитектур")
+        result.append(
             {
-                "image": f"{host}/{remote}:{tag}",
-                "digest": f"{host}/{remote}@{index}",
-                "platforms": {
-                    arch: f"{host}/{remote}@{digests[arch]}" for arch in PLATFORMS
+                "component": component,
+                "indexes": indexes,
+                "manifests": {
+                    arch: digest_reference(manifests[arch], host, remote)
+                    for arch in PLATFORMS
                 },
-                "latest": latest,
+                "tested": dict(tested),
             }
         )
-    return report
+    return result
+
+
+def sbom_path(directory: Path, image: str) -> Path:
+    """Файл CycloneDX, который Trivy пишет в CI для локального образа."""
+    return directory / f"{image.replace(':', '-')}.cdx.json"
+
+
+def verify_sboms(directory: Path, images: dict[str, str]) -> dict[str, Path]:
+    """Найти SBOM каждого из четырёх проверенных образов и сверить его image ID.
+
+    Trivy записывает в `metadata.component` свойство ImageID — тот же ID, что
+    `docker image inspect` и `tested-images.json`. SBOM другой сборки не
+    прикладывается к опубликованному образу.
+    """
+    found = {}
+    for image in LOCAL_IMAGES:
+        path = sbom_path(directory, image)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise DeliveryError(
+                f"Нет корректного SBOM {path.name} для {image}"
+            ) from None
+        if not isinstance(data, dict):
+            data = {}
+        metadata = data.get("metadata")
+        component = metadata.get("component") if isinstance(metadata, dict) else None
+        properties = (
+            component.get("properties") if isinstance(component, dict) else None
+        )
+        identifiers = {
+            entry.get("value")
+            for entry in (properties if isinstance(properties, list) else [])
+            if isinstance(entry, dict) and entry.get("name") == SBOM_IMAGE_ID
+        }
+        if data.get("bomFormat") != "CycloneDX" or identifiers != {images[image]}:
+            raise DeliveryError(f"SBOM {path.name} не относится к проверенному {image}")
+        found[image] = path
+    return found
+
+
+def signing_identity(server: str, workflow_ref: str, repository: str, ref: str) -> str:
+    """Собрать identity сертификата: workflow ci.yml этого репозитория и ref.
+
+    Fulcio записывает её в сертификат keyless-подписи. Подпись другого
+    workflow, ветки или fork не пройдёт `cosign verify` с этой identity.
+    """
+    expected = f"{repository}/{WORKFLOW_PATH}@{ref}"
+    is_release = ref.startswith("refs/tags/") and VERSION.fullmatch(
+        ref.removeprefix("refs/tags/")
+    )
+    if (
+        server != "https://github.com"
+        or not GITHUB_REPOSITORY.fullmatch(repository)
+        or not (ref == "refs/heads/main" or is_release)
+        or workflow_ref != expected
+    ):
+        raise DeliveryError("Подписывать может только ci.yml из main или vX.Y.Z")
+    return f"{server}/{expected}"
+
+
+def sign_images(
+    report: object,
+    repository: str,
+    commit: str,
+    identity: str,
+    sbom_directory: Path,
+    *,
+    host: str = "ghcr.io",
+) -> list[str]:
+    """Подписать index обоих пакетов, приложить SBOM и проверить результат.
+
+    `cosign sign` и `cosign attest` получают только адреса `@sha256:…` из
+    отчёта publish. Затем `cosign verify` и `verify-attestation` требуют
+    identity этого workflow, OIDC-издателя GitHub и SHA проверяемого commit.
+    """
+    require_commit(commit)
+    targets = signing_targets(report, repository, host=host)
+    images = {
+        COMPONENTS[item["component"]][arch]: item["tested"][arch]
+        for item in targets
+        for arch in PLATFORMS
+    }
+    sboms = verify_sboms(sbom_directory, images)
+    for item in targets:
+        for reference in item["indexes"]:
+            command("cosign", "sign", "--yes", reference)
+        for arch in PLATFORMS:
+            sbom = sboms[COMPONENTS[item["component"]][arch]]
+            command(
+                "cosign",
+                "attest",
+                "--yes",
+                "--type",
+                "cyclonedx",
+                "--predicate",
+                str(sbom),
+                item["manifests"][arch],
+            )
+    policy = (
+        "--certificate-identity",
+        identity,
+        "--certificate-oidc-issuer",
+        OIDC_ISSUER,
+        "--certificate-github-workflow-sha",
+        commit,
+    )
+    lines = ["## Подписи и SBOM", "", f"- Identity: `{identity}`"]
+    for item in targets:
+        for reference in item["indexes"]:
+            command("cosign", "verify", *policy, reference)
+            lines.append(f"- Подпись index проверена: `{reference}`")
+        for arch in PLATFORMS:
+            reference = item["manifests"][arch]
+            command(
+                "cosign",
+                "verify-attestation",
+                "--type",
+                "cyclonedx",
+                *policy,
+                reference,
+            )
+            lines.append(f"- SBOM CycloneDX {arch} проверен: `{reference}`")
+    return lines
 
 
 def write_summary(report: list[dict]) -> None:
@@ -492,6 +702,11 @@ def write_summary(report: list[dict]) -> None:
                 "",
             ]
         )
+    append_summary(lines)
+
+
+def append_summary(lines: list[str]) -> None:
+    """Напечатать Markdown и дописать его в сводку задания GitHub Actions."""
     result = "\n".join(lines) + "\n"
     print(result)
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -514,33 +729,57 @@ def main() -> int:
     """Запустить один этап workflow и вернуть безопасное сообщение при ошибке."""
     use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("validate", "export", "publish"))
+    parser.add_argument("operation", choices=("validate", "export", "publish", "sign"))
     parser.add_argument("--directory", type=Path, default=Path("image-artifact"))
+    # SBOM из задания container и отчёт publish, который читает sign.
+    parser.add_argument("--sbom-directory", type=Path, default=Path("sbom"))
+    parser.add_argument("--report", type=Path, default=Path("published-images.json"))
     arguments = parser.parse_args()
     commit = os.environ.get("GITHUB_SHA", "")
+    ref = os.environ.get("GITHUB_REF", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
     try:
         if arguments.operation == "validate":
-            version = validate_release(os.environ.get("GITHUB_REF", ""), commit)
+            version = validate_release(ref, commit)
             if output := os.environ.get("GITHUB_OUTPUT"):
                 with Path(output).open("a", encoding="utf-8") as stream:
                     stream.write(f"version={version}\n")
             print(f"Проверено: {version or 'проверка ветки/PR без version-тега'}")
         elif arguments.operation == "export":
             export_images(arguments.directory, commit)
-        else:
-            version = validate_release(os.environ.get("GITHUB_REF", ""), commit)
+        elif arguments.operation == "publish":
+            version = validate_release(ref, commit)
             images = verify_images(arguments.directory, commit)
+            # Отсутствующий или чужой SBOM останавливает job до первой записи.
+            verify_sboms(arguments.sbom_directory, images)
             registry = Registry(
                 os.environ.get("GITHUB_ACTOR", ""), os.environ.get("GITHUB_TOKEN", "")
             )
-            write_summary(
-                publish_images(
-                    images,
-                    os.environ.get("GITHUB_REPOSITORY", ""),
-                    commit,
-                    registry,
-                    version=version,
-                    main_sha=os.environ.get("MAIN_SHA", ""),
+            report = publish_images(
+                images,
+                repository,
+                commit,
+                registry,
+                version=version,
+                main_sha=os.environ.get("MAIN_SHA", ""),
+            )
+            arguments.report.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            write_summary(report)
+        else:
+            validate_release(ref, commit)
+            identity = signing_identity(
+                os.environ.get("GITHUB_SERVER_URL", ""),
+                os.environ.get("GITHUB_WORKFLOW_REF", ""),
+                repository,
+                ref,
+            )
+            report = json.loads(arguments.report.read_text(encoding="utf-8"))
+            append_summary(
+                sign_images(
+                    report, repository, commit, identity, arguments.sbom_directory
                 )
             )
     except (DeliveryError, subprocess.CalledProcessError, OSError, ValueError) as error:

@@ -22,3 +22,9 @@ class ResourceConflict(ResourceError):
     """Сообщить о конфликте уникального значения с уже сохранённой записью."""
 
     status_code = 409
+
+
+class ResourceForbidden(ResourceError):
+    """Сообщить, что роль сотрудника не допускает это действие."""
+
+    status_code = 403

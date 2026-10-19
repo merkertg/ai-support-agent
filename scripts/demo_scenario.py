@@ -4,11 +4,16 @@
 --verify-review проверяет одобрение и отклонение на двух отдельных обращениях.
 Повторный последовательный запуск переиспользует записи; POST не повторяется
 автоматически даже при сетевой ошибке. Скрипт не отправляет внешние письма.
+
+Запросы идут от имени сотрудника, чей токен лежит в переменной окружения
+API_TOKEN: для подготовки и анализа достаточно роли operator, для
+--verify-review нужна роль reviewer или admin. Токен никогда не печатается.
 """
 
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -20,7 +25,9 @@ PAGE_SIZE = 100
 MAX_PAGES = 100
 MAX_RESPONSE_BYTES = 1024 * 1024
 CUSTOMER_EMAIL = "stage10-customer@example.com"
-OPERATOR_EMAIL = "stage10-operator@example.com"
+TOKEN_ENV = "API_TOKEN"
+REVIEW_ROLES = {"reviewer", "admin"}
+STAFF_ROLES = {"operator"} | REVIEW_ROLES
 PRODUCT_CODE = "techflow-server"
 # Это вымышленный учебный ключ. Он не включается в stdout, stderr и URL.
 LICENSE_KEY = "DEMO-STAGE10-TECHFLOW-LOCAL-ONLY"
@@ -96,6 +103,7 @@ class DemoClient:
 
     url: str
     deadline: float
+    token: str
 
     def request(
         self,
@@ -108,7 +116,10 @@ class DemoClient:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise DemoError("Истёк общий тайм-аут сценария")
-        headers = {"User-Agent": "ai-support-agent-demo-stage10"}
+        headers = {
+            "User-Agent": "ai-support-agent-demo-stage10",
+            "Authorization": f"Bearer {self.token}",
+        }
         data = None
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -140,9 +151,15 @@ class DemoClient:
                 body = b"".join(chunks)
         except HTTPError as error:
             # Не включаем URL, тело HTTPError или JSON запроса в диагностику.
-            raise DemoError(
-                f"HTTP {error.code}: проверь API и повтори сценарий после исправления"
-            ) from error
+            hints = {
+                401: f"API не принял токен: проверь {TOKEN_ENV} или получи новый",
+                403: "роль сотрудника токена не допускает это действие",
+                429: "превышен лимит изменений в минуту; повтори позже",
+            }
+            hint = hints.get(
+                error.code, "проверь API и повтори сценарий после исправления"
+            )
+            raise DemoError(f"HTTP {error.code}: {hint}") from error
         except (URLError, OSError) as error:
             raise DemoError(
                 "API недоступно; POST не повторялся. Проверь стенд и запусти заново"
@@ -199,11 +216,20 @@ class DemoClient:
         return created
 
 
-def require_mock(client: DemoClient) -> None:
-    """До первого POST проверить готовность БД, mock LLM и mock-индекс знаний."""
+def require_mock(client: DemoClient, *, check_review: bool = False) -> dict:
+    """До первого POST проверить БД, сотрудника токена, mock LLM и индекс знаний.
+
+    Возвращает сотрудника из /api/auth/me: он станет автором решений.
+    """
     ready = client.object("/ready")
     if ready != {"status": "ok", "database": "ok"}:
         raise DemoError("База данных не готова или требуется миграция")
+    staff = client.object("/api/auth/me")
+    if staff.get("role") not in STAFF_ROLES:
+        raise DemoError("API вернул неизвестную роль сотрудника токена")
+    record_id(staff)
+    if check_review and staff["role"] not in REVIEW_ROLES:
+        raise DemoError("Для --verify-review нужен токен роли reviewer или admin")
     llm = client.object("/api/llm/status")
     knowledge = client.object("/api/knowledge/status")
     if llm.get("provider") != "mock" or llm.get("configured") is not True:
@@ -216,10 +242,15 @@ def require_mock(client: DemoClient) -> None:
         or knowledge["documents"] < 1
     ):
         raise DemoError("Нужен готовый индекс знаний с EMBEDDING_PROVIDER=mock")
+    return staff
 
 
-def ensure_fixtures(client: DemoClient) -> dict:
-    """Подготовить отдельные вымышленные записи, не изменяя найденные данные."""
+def ensure_fixtures(client: DemoClient, staff: dict) -> dict:
+    """Подготовить отдельные вымышленные записи, не изменяя найденные данные.
+
+    Отдельного учебного сотрудника скрипт не создаёт: решения принимает
+    сотрудник токена, а создавать сотрудников может только администратор.
+    """
     customer = client.ensure(
         "customers",
         {"email": CUSTOMER_EMAIL},
@@ -238,17 +269,6 @@ def ensure_fixtures(client: DemoClient) -> dict:
             "description": "Вымышленный продукт для учебной демонстрации",
         },
     )
-    operator = client.ensure(
-        "users",
-        {"email": OPERATOR_EMAIL},
-        {
-            "name": "Учебный оператор этапа 10",
-            "email": OPERATOR_EMAIL,
-            "role": "operator",
-        },
-    )
-    if operator.get("role") != "operator" or operator.get("is_active") is not True:
-        raise DemoError("Учебный сотрудник должен быть активным оператором")
     license_record = client.ensure(
         "licenses",
         {"license_key": LICENSE_KEY},
@@ -273,7 +293,7 @@ def ensure_fixtures(client: DemoClient) -> dict:
     return {
         "customer_id": customer["id"],
         "product_id": product["id"],
-        "operator_id": operator["id"],
+        "staff_id": staff["id"],
         "license_id": license_record["id"],
     }
 
@@ -370,7 +390,8 @@ def verify_review(client: DemoClient, fixtures: dict, decision: str) -> dict:
     suggestion = client.object(f"/api/suggestions/{suggestion_id}")
     expected_status = "approved" if decision == "approve" else "rejected"
     if suggestion.get("status") == "pending":
-        payload = {"decision": decision, "reviewer_id": fixtures["operator_id"]}
+        # Автора решения API берёт из токена: в теле его нет.
+        payload = {"decision": decision}
         if decision == "approve":
             payload["final_content"] = APPROVED_TEXT
             payload["comment"] = "Явная учебная проверка --verify-review"
@@ -380,7 +401,7 @@ def verify_review(client: DemoClient, fixtures: dict, decision: str) -> dict:
         suggestion = client.object(f"/api/suggestions/{suggestion_id}")
     if (
         suggestion.get("status") != expected_status
-        or suggestion.get("reviewed_by") != fixtures["operator_id"]
+        or suggestion.get("reviewed_by") != fixtures["staff_id"]
     ):
         raise DemoError("Предложение рассмотрено с другим решением или сотрудником")
     messages = client.records(f"/api/tickets/{ticket['id']}/messages")
@@ -391,7 +412,7 @@ def verify_review(client: DemoClient, fixtures: dict, decision: str) -> dict:
             len(messages) != 1
             or messages[0].get("id") != suggestion.get("delivered_message_id")
             or messages[0].get("author_type") != "operator"
-            or messages[0].get("user_id") != fixtures["operator_id"]
+            or messages[0].get("user_id") != fixtures["staff_id"]
             or messages[0].get("content") != APPROVED_TEXT
             or current_ticket.get("status") != "waiting_customer"
             or workflow.get("state") != "delivered"
@@ -415,8 +436,8 @@ def verify_review(client: DemoClient, fixtures: dict, decision: str) -> dict:
 
 def run_demo(client: DemoClient, *, check_review: bool = False) -> dict:
     """Оставить основной черновик человеку и опционально проверить два других пути."""
-    require_mock(client)
-    fixtures = ensure_fixtures(client)
+    staff = require_mock(client, check_review=check_review)
+    fixtures = ensure_fixtures(client, staff)
     ticket = ensure_ticket(client, fixtures, SUBJECT)
     run, workflow = ensure_analysis(client, ticket)
     result = fixtures | {
@@ -457,7 +478,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Явно проверить approve/reject на двух отдельных учебных обращениях",
     )
     args = parser.parse_args(argv)
-    client = DemoClient(args.url, time.monotonic() + args.timeout)
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        print(
+            f"Демо: задай токен сотрудника в переменной {TOKEN_ENV} "
+            "(python -m app.tokens issue …)",
+            file=sys.stderr,
+        )
+        return 1
+    client = DemoClient(args.url, time.monotonic() + args.timeout, token)
     try:
         result = run_demo(client, check_review=args.verify_review)
     except DemoError as error:

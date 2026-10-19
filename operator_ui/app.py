@@ -2,6 +2,8 @@
 
 Все изменения находятся внутри форм с явной кнопкой отправки. Обычный rerun
 делает только GET; длинные операции и решения никогда не повторяются клиентом.
+Сотрудник входит своим API-токеном: API определяет по нему имя, роль и автора
+решения. Интерфейс лишь скрывает недоступные роли формы; права проверяет API.
 """
 
 import streamlit as st
@@ -24,11 +26,19 @@ PRIORITIES = {
     "Высокий": "high",
     "Критический": "critical",
 }
+ROLES = {"Оператор": "operator", "Рецензент": "reviewer", "Администратор": "admin"}
+ROLE_NAMES = {value: label for label, value in ROLES.items()}
+# Решение по предложению агента принимают рецензент и администратор.
+REVIEW_ROLES = {"reviewer", "admin"}
+TOKEN_HELP = (
+    "Токен выдаёт администратор: python -m app.tokens issue или "
+    "POST /api/users/{id}/tokens. Токен хранится только в этом сеансе браузера."
+)
 
 
-def make_client() -> APIClient:
+def make_client(token: str) -> APIClient:
     """Создать HTTP-клиент; отдельная фабрика позволяет проверять UI без сети."""
-    return APIClient()
+    return APIClient(token)
 
 
 def show_error(error: APIError) -> None:
@@ -306,8 +316,11 @@ def tickets_page(client: APIClient, llm: dict, knowledge: dict) -> None:
             ticket_card(client, int(selected), llm, knowledge)
 
 
-def review_form(client: APIClient, suggestion: dict, reviewer_id: int) -> None:
-    """Отправить решение сотрудника только после явного подтверждения формы."""
+def review_form(client: APIClient, suggestion: dict, staff: dict) -> None:
+    """Отправить решение сотрудника только после явного подтверждения формы.
+
+    Автора решения тело не содержит: API берёт его из токена сеанса.
+    """
     st.text(suggestion["content"])
     if suggestion["status"] != "pending":
         st.info(f"Решение уже принято: {suggestion['status']}.")
@@ -324,8 +337,14 @@ def review_form(client: APIClient, suggestion: dict, reviewer_id: int) -> None:
             }
         )
         return
+    if staff["role"] not in REVIEW_ROLES:
+        st.info(
+            "Решение по предложению принимает рецензент или администратор. "
+            f"Ваша роль — {ROLE_NAMES.get(staff['role'], staff['role'])}."
+        )
+        return
     st.caption(
-        "Одобрение сохранит сообщение оператора и статус waiting_customer. "
+        "Одобрение сохранит сообщение от вашего имени и статус waiting_customer. "
         "Внешнее письмо клиенту не отправляется. Предложение по закрытому "
         "обращению (resolved или closed) можно только отклонить."
     )
@@ -354,7 +373,6 @@ def review_form(client: APIClient, suggestion: dict, reviewer_id: int) -> None:
             return
         payload = {
             "decision": "approve" if decision == "Одобрить" else "reject",
-            "reviewer_id": reviewer_id,
             "final_content": content.strip() if decision == "Одобрить" else None,
             "comment": comment.strip() or None,
         }
@@ -365,7 +383,7 @@ def review_form(client: APIClient, suggestion: dict, reviewer_id: int) -> None:
         st.rerun()
 
 
-def queue_page(client: APIClient, reviewer_id: int) -> None:
+def queue_page(client: APIClient, staff: dict) -> None:
     """Показать очередь и решение по выбранному предложению с ограниченной страницей."""
     st.header("Очередь проверки")
     if notice := st.session_state.pop("review_notice", None):
@@ -402,7 +420,7 @@ def queue_page(client: APIClient, reviewer_id: int) -> None:
         st.subheader(
             f"Предложение №{suggestion['id']} · обращение №{suggestion['ticket_id']}"
         )
-        review_form(client, suggestion, reviewer_id)
+        review_form(client, suggestion, staff)
 
 
 def knowledge_page(client: APIClient, knowledge: dict) -> None:
@@ -437,8 +455,12 @@ def knowledge_page(client: APIClient, knowledge: dict) -> None:
                 st.text(f"Источник: {hit['source_path']}")
 
 
-def catalog_page(client: APIClient) -> None:
-    """Создать минимальные справочники без загрузки всей БД или доступа к SQL."""
+def catalog_page(client: APIClient, staff: dict) -> None:
+    """Создать минимальные справочники без загрузки всей БД или доступа к SQL.
+
+    Сотрудников создаёт только администратор; токен новому сотруднику он
+    выдаёт отдельно (CLI или API), в интерфейсе секреты не показываются.
+    """
     st.header("Справочники")
     resources = {
         "Клиенты": "customers",
@@ -453,6 +475,9 @@ def catalog_page(client: APIClient) -> None:
         rows = [{**item, "license_key": "••••••••"} for item in rows]
     st.dataframe(rows, hide_index=True, width="stretch")
     pagination("catalog", offset, len(rows))
+    if resource == "users" and staff["role"] != "admin":
+        st.info("Создавать сотрудников и выдавать им токены может администратор.")
+        return
     with st.form(f"create_{resource}"):
         payload = {}
         if resource in {"customers", "products", "users"}:
@@ -481,7 +506,8 @@ def catalog_page(client: APIClient) -> None:
             )
             st.caption("Создаётся активная бессрочная лицензия с текущей датой выдачи.")
         if resource == "users":
-            payload["role"] = "operator"
+            payload["role"] = ROLES[st.selectbox("Роль", list(ROLES))]
+            st.caption("Токен для входа выдаёт администратор после создания.")
         submitted = st.form_submit_button("Создать запись")
     if submitted:
         required = {"name", "email", "code", "license_key"}.intersection(payload)
@@ -524,6 +550,19 @@ def dashboard_page(client: APIClient) -> None:
     )
 
 
+def sidebar_token() -> str:
+    """Показать поле токена; значение живёт только в сеансе этого браузера."""
+    with st.sidebar:
+        st.header("Рабочая панель")
+        return st.text_input(
+            "Токен сотрудника",
+            type="password",
+            key="api_token",
+            max_chars=64,
+            help=TOKEN_HELP,
+        ).strip()
+
+
 def main() -> None:
     """Открыть рабочий стол; обычное обновление страницы выполняет только чтение."""
     st.set_page_config(
@@ -531,10 +570,22 @@ def main() -> None:
     )
     st.title("AI Support")
     st.caption("Рабочее место оператора технической поддержки")
+    token = sidebar_token()
+    if not token:
+        st.info(
+            "Введите свой токен сотрудника на боковой панели. "
+            "Без токена API не показывает данные и не принимает решения."
+        )
+        st.caption(TOKEN_HELP)
+        return
     try:
-        with make_client() as client:
+        with make_client(token) as client:
+            staff = client.me()
             with st.sidebar:
-                st.header("Рабочая панель")
+                st.caption(
+                    f"Вы: {staff['name']} · "
+                    f"{ROLE_NAMES.get(staff['role'], staff['role'])}"
+                )
                 area = st.radio(
                     "Раздел",
                     [
@@ -544,11 +595,6 @@ def main() -> None:
                         "База знаний",
                         "Справочники",
                     ],
-                )
-                reviewer_id = id_input("ID сотрудника", key="reviewer_id")
-                st.caption(
-                    "ID сотрудника выбирает автора решения. "
-                    "Авторизация пока не реализована."
                 )
                 st.button("Обновить данные")
                 llm = read_status(client, "llm")
@@ -566,10 +612,10 @@ def main() -> None:
             elif area == "Обращения":
                 tickets_page(client, llm, knowledge)
             elif area == "Очередь проверки":
-                queue_page(client, reviewer_id)
+                queue_page(client, staff)
             elif area == "База знаний":
                 knowledge_page(client, knowledge)
             else:
-                catalog_page(client)
+                catalog_page(client, staff)
     except APIError as error:
         show_error(error)

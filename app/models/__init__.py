@@ -1,8 +1,9 @@
-"""Публичные модели этапа 02; импорт регистрирует все таблицы в Base.metadata."""
+"""Публичные модели проекта; импорт регистрирует все таблицы в Base.metadata."""
 
 from app.models.entities import (
     AgentRun,
     AgentSuggestion,
+    ApiToken,
     Customer,
     KnowledgeDocument,
     License,
@@ -15,6 +16,7 @@ from app.models.entities import (
 __all__ = [
     "AgentRun",
     "AgentSuggestion",
+    "ApiToken",
     "Customer",
     "KnowledgeDocument",
     "License",

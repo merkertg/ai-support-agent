@@ -174,6 +174,7 @@ def test_orphan_points_without_registry_rows_are_removed(
 @pytest.fixture
 def api_client(
     migrated_engine: Engine,
+    staff_headers: dict[str, str],
     index_factory,
     test_qdrant_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -192,7 +193,7 @@ def api_client(
     app.dependency_overrides[get_api_session] = session_override
     app.dependency_overrides[get_knowledge_factory] = lambda: index_factory
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers=staff_headers) as client:
             yield client
     finally:
         app.dependency_overrides.clear()

@@ -6,12 +6,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
 
 from app.schemas.drafts import Reply
-from app.schemas.resources import (
-    CreateSchema,
-    ReadSchema,
-    StrictPositiveId,
-    TicketStatus,
-)
+from app.schemas.resources import CreateSchema, ReadSchema, TicketStatus
 
 ReviewDecision = Literal["approve", "reject"]
 SuggestionStatus = Literal["pending", "approved", "rejected"]
@@ -24,12 +19,11 @@ Comment = Annotated[
 class ReviewRequest(CreateSchema):
     """Решение: одобрить (с необязательной правкой текста) или отклонить с причиной.
 
-    reviewer_id выбирает сотрудника из таблицы users. Это не авторизация:
-    на учебном этапе API не проверяет, кто именно отправил запрос.
+    Автора решения тело не содержит: API берёт его из токена запроса.
+    Поле reviewer_id запрещено, как и любое другое неизвестное поле.
     """
 
     decision: ReviewDecision
-    reviewer_id: StrictPositiveId
     final_content: Reply | None = None
     comment: Comment | None = None
 

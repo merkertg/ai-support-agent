@@ -10,6 +10,12 @@ from app.api.dependencies import ApiSession
 from app.api.knowledge import get_knowledge_factory
 from app.api.reviews import get_checkpointer_factory
 from app.api.routes import ResourceId
+from app.api.security import (
+    AUTH_RESPONSES,
+    WRITE_RESPONSES,
+    get_principal,
+    operator_writer,
+)
 from app.knowledge.index import IndexFactory
 from app.schemas.agents import AgentErrorRead, AgentRunRead, AnalyzeRequest
 from app.schemas.resources import ErrorRead
@@ -18,7 +24,12 @@ from app.services.agents import AgentRunFailure, ProviderFactory
 from app.workflow import service as workflow
 from app.workflow.service import CheckpointerFactory
 
-router = APIRouter(prefix="/api", tags=["Agent"])
+router = APIRouter(
+    prefix="/api",
+    tags=["Agent"],
+    dependencies=[Depends(get_principal)],
+    responses=AUTH_RESPONSES,
+)
 
 
 def get_agent_factory() -> ProviderFactory:
@@ -38,7 +49,9 @@ async def agent_error_handler(request: Request, error: AgentRunFailure) -> JSONR
     "/tickets/{resource_id}/analyze",
     status_code=status.HTTP_201_CREATED,
     response_model=AgentRunRead,
-    responses={
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES
+    | {
         404: {"model": ErrorRead, "description": "Обращение не найдено"},
         413: {"model": AgentErrorRead, "description": "Контекст превышает лимит"},
         502: {"model": AgentErrorRead, "description": "Непригодный ответ агента"},

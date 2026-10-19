@@ -1,8 +1,15 @@
-"""Проверить запущенное API через настоящий HTTP без сторонних библиотек."""
+"""Проверить запущенное API через настоящий HTTP без сторонних библиотек.
+
+Маршруты /api/* требуют токен сотрудника. Скрипт читает его из переменной
+окружения API_TOKEN (не из аргументов: они видны в списке процессов) и
+никогда не печатает. Для --check-review нужен токен роли admin: проверка
+создаёт учебного оператора, выдаёт и отзывает его токен.
+"""
 
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from urllib.error import HTTPError, URLError
@@ -34,6 +41,8 @@ KNOWLEDGE_PRODUCT = "techflow-server"
 KNOWLEDGE_TOP_DOCUMENT = "KB-SERVER-START"
 DRAFT_CATEGORIES = {"technical_issue", "license_question", "how_to", "other"}
 MOCK_NOTE = "Реальная модель не вызывалась."
+TOKEN_ENV = "API_TOKEN"
+STAFF_ROLES = {"operator", "reviewer", "admin"}
 
 
 class SmokeTestError(Exception):
@@ -104,14 +113,20 @@ def fetch(
     method: str = "GET",
     payload: dict | None = None,
     expected_status: int = 200,
+    token: str | None = None,
 ) -> bytes:
-    """Выполнить HTTP-запрос до дедлайна без скрытых повторов POST."""
+    """Выполнить HTTP-запрос до дедлайна без скрытых повторов POST.
+
+    token добавляет заголовок Authorization; в сообщения об ошибках он не входит.
+    """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise SmokeTestError(f"Истёк общий тайм-аут перед запросом {url}")
     try:
         # Каждая сетевая попытка ограничена оставшимся временем и двумя секундами.
         headers = {"User-Agent": "ai-support-agent-smoke-test"}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
         data = None
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -155,6 +170,11 @@ def fetch(
     return body
 
 
+def api_fetch(token: str, url: str, deadline: float, **options) -> bytes:
+    """Выполнить запрос к /api/* от имени сотрудника с токеном из API_TOKEN."""
+    return fetch(url, deadline, token=token, **options)
+
+
 def json_object(body: bytes, endpoint: str) -> dict:
     """Разобрать UTF-8 JSON и потребовать объект верхнего уровня."""
     try:
@@ -166,7 +186,34 @@ def json_object(body: bytes, endpoint: str) -> dict:
     return payload
 
 
-def check_business_api(url: str, paths: dict, deadline: float) -> None:
+def check_authentication(url: str, paths: dict, deadline: float, token: str) -> dict:
+    """Проверить, что /api/* закрыт без токена, и узнать сотрудника API_TOKEN.
+
+    Запрос без токена должен получить 401 ещё до чтения данных. Затем
+    /api/auth/me показывает, от чьего имени smoke выполняет остальные шаги.
+    """
+    operations = paths.get("/api/auth/me")
+    if not isinstance(operations, dict) or not isinstance(operations.get("get"), dict):
+        raise SmokeTestError("/openapi.json: отсутствует операция GET /api/auth/me")
+    try:
+        fetch(f"{url}/api/customers?limit=1", deadline, expected_status=401)
+    except SmokeTestError as error:
+        raise SmokeTestError(
+            "/api/customers: запрос без токена не получил 401"
+        ) from error
+    print("OK /api/customers без токена: HTTP 401")
+    me = json_object(api_fetch(token, f"{url}/api/auth/me", deadline), "/api/auth/me")
+    if (
+        type(me.get("id")) is not int
+        or me["id"] <= 0
+        or me.get("role") not in STAFF_ROLES
+    ):
+        raise SmokeTestError("/api/auth/me: неверный сотрудник токена")
+    print(f"OK /api/auth/me: сотрудник №{me['id']}, роль {me['role']}")
+    return me
+
+
+def check_business_api(url: str, paths: dict, deadline: float, token: str) -> None:
     """Проверить 12 операций в OpenAPI и четыре списка по настоящему HTTP.
 
     Smoke ничего не записывает в БД: создание и ошибки транзакций проверяют
@@ -199,7 +246,9 @@ def check_business_api(url: str, paths: dict, deadline: float) -> None:
             )
         endpoint = f"{collection}?limit=1"
         try:
-            records = json.loads(fetch(f"{url}{endpoint}", deadline).decode("utf-8"))
+            records = json.loads(
+                api_fetch(token, f"{url}{endpoint}", deadline).decode("utf-8")
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SmokeTestError(
                 f"{endpoint}: ответ содержит невалидный JSON"
@@ -218,7 +267,7 @@ def check_business_api(url: str, paths: dict, deadline: float) -> None:
 
 
 def create_smoke_record(
-    url: str, resource: str, payload: dict, deadline: float
+    token: str, url: str, resource: str, payload: dict, deadline: float
 ) -> dict:
     """Явно создать учебную запись только в режимах --check-llm и --check-agent.
 
@@ -227,7 +276,8 @@ def create_smoke_record(
     """
     endpoint = f"/api/{resource}"
     record = json_object(
-        fetch(
+        api_fetch(
+            token,
             f"{url}{endpoint}",
             deadline,
             method="POST",
@@ -252,7 +302,7 @@ def has_operation(paths: dict, prefix: str, suffix: str, method: str) -> bool:
     )
 
 
-def require_mock_llm(url: str, paths: dict, deadline: float) -> None:
+def require_mock_llm(url: str, paths: dict, deadline: float, token: str) -> None:
     """До любого POST убедиться, что настроен mock и платный провайдер исключён."""
     status_path = paths.get("/api/llm/status")
     if not isinstance(status_path, dict) or not isinstance(
@@ -264,7 +314,7 @@ def require_mock_llm(url: str, paths: dict, deadline: float) -> None:
             "/openapi.json: отсутствует операция POST /api/tickets/{id}/draft"
         )
     llm_status = json_object(
-        fetch(f"{url}/api/llm/status", deadline), "/api/llm/status"
+        api_fetch(token, f"{url}/api/llm/status", deadline), "/api/llm/status"
     )
     if llm_status != EXPECTED_MOCK_LLM_STATUS:
         # Проверка выполняется ДО любого POST: реальный OpenAI не вызывается.
@@ -274,7 +324,9 @@ def require_mock_llm(url: str, paths: dict, deadline: float) -> None:
     print("OK /api/llm/status: mock настроен; платный провайдер исключён")
 
 
-def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
+def check_mock_llm(
+    url: str, paths: dict, deadline: float, token: str
+) -> dict[str, dict]:
     """Проверить mock-черновик после require_mock_llm и вернуть учебные записи.
 
     Флаг создаёт три вымышленные записи (клиент, продукт, обращение). Сам
@@ -283,6 +335,7 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
     """
     suffix = uuid4().hex[:12]
     customer = create_smoke_record(
+        token,
         url,
         "customers",
         {
@@ -292,6 +345,7 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
         deadline,
     )
     product = create_smoke_record(
+        token,
         url,
         "products",
         {
@@ -301,6 +355,7 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
         deadline,
     )
     ticket = create_smoke_record(
+        token,
         url,
         "tickets",
         {
@@ -313,7 +368,9 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
         deadline,
     )
     endpoint = f"/api/tickets/{ticket['id']}/draft"
-    draft = json_object(fetch(f"{url}{endpoint}", deadline, method="POST"), endpoint)
+    draft = json_object(
+        api_fetch(token, f"{url}{endpoint}", deadline, method="POST"), endpoint
+    )
     content = draft.get("content")
     if (
         type(draft.get("ticket_id")) is not int
@@ -334,7 +391,8 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
             f"{endpoint}: неверный контракт демонстрационного черновика"
         )
     unchanged = json_object(
-        fetch(f"{url}/api/tickets/{ticket['id']}", deadline), "/api/tickets/{id}"
+        api_fetch(token, f"{url}/api/tickets/{ticket['id']}", deadline),
+        "/api/tickets/{id}",
     )
     if unchanged != ticket:
         raise SmokeTestError("Черновик изменил сохранённое обращение")
@@ -343,7 +401,7 @@ def check_mock_llm(url: str, paths: dict, deadline: float) -> dict[str, dict]:
     return {"customer": customer, "product": product, "ticket": ticket}
 
 
-def check_knowledge(url: str, paths: dict, deadline: float) -> None:
+def check_knowledge(url: str, paths: dict, deadline: float, token: str) -> None:
     """Проверить индекс и поиск по базе знаний; режим только читает данные.
 
     Сначала статус должен подтвердить mock-эмбеддинги и готовый индекс:
@@ -361,7 +419,8 @@ def check_knowledge(url: str, paths: dict, deadline: float) -> None:
                 f"/openapi.json: отсутствует операция {method.upper()} {path}"
             )
     status = json_object(
-        fetch(f"{url}/api/knowledge/status", deadline), "/api/knowledge/status"
+        api_fetch(token, f"{url}/api/knowledge/status", deadline),
+        "/api/knowledge/status",
     )
     if (
         status.get("embedding_provider") != "mock"
@@ -386,7 +445,8 @@ def check_knowledge(url: str, paths: dict, deadline: float) -> None:
     print(f"OK /api/knowledge/status: индекс готов, статей {documents}, точек {points}")
     endpoint = "/api/knowledge/search"
     found = json_object(
-        fetch(
+        api_fetch(
+            token,
             f"{url}{endpoint}",
             deadline,
             method="POST",
@@ -412,7 +472,8 @@ def check_knowledge(url: str, paths: dict, deadline: float) -> None:
         raise SmokeTestError(f"{endpoint}: известная статья не найдена первой")
     print(f"OK {endpoint}: первая статья {KNOWLEDGE_TOP_DOCUMENT} с источником")
     other = json_object(
-        fetch(
+        api_fetch(
+            token,
             f"{url}{endpoint}",
             deadline,
             method="POST",
@@ -479,7 +540,7 @@ def valid_agent_run(run: dict, ticket_id: int) -> bool:
 
 
 def check_mock_agent(
-    url: str, paths: dict, deadline: float, records: dict[str, dict]
+    url: str, paths: dict, deadline: float, records: dict[str, dict], token: str
 ) -> dict:
     """Проверить сохранённый запуск агента на учебных записях --check-llm.
 
@@ -501,6 +562,7 @@ def check_mock_agent(
     )
     license_key = f"SMOKE-{uuid4().hex[:12].upper()}"
     create_smoke_record(
+        token,
         url,
         "licenses",
         {
@@ -511,7 +573,8 @@ def check_mock_agent(
         deadline,
     )
     endpoint = f"/api/tickets/{ticket['id']}/analyze"
-    body = fetch(
+    body = api_fetch(
+        token,
         f"{url}{endpoint}",
         deadline,
         method="POST",
@@ -523,12 +586,15 @@ def check_mock_agent(
         raise SmokeTestError(f"{endpoint}: неверный контракт сохранённого запуска")
     print(f"OK {endpoint}: HTTP 201, пять инструментов, черновик ожидает проверки")
     stored_endpoint = f"/api/agent-runs/{run['id']}"
-    stored = json_object(fetch(f"{url}{stored_endpoint}", deadline), stored_endpoint)
+    stored = json_object(
+        api_fetch(token, f"{url}{stored_endpoint}", deadline), stored_endpoint
+    )
     if stored != run:
         raise SmokeTestError(f"{stored_endpoint}: сохранённый запуск отличается")
     print(f"OK {stored_endpoint}: GET читает тот же запуск без нового вызова модели")
     unchanged = json_object(
-        fetch(f"{url}/api/tickets/{ticket['id']}", deadline), "/api/tickets/{id}"
+        api_fetch(token, f"{url}/api/tickets/{ticket['id']}", deadline),
+        "/api/tickets/{id}",
     )
     if unchanged != ticket:
         raise SmokeTestError("Агент изменил сохранённое обращение")
@@ -539,14 +605,108 @@ def check_mock_agent(
 REVIEW_TEXT = "Smoke: ответ проверен и одобрен оператором."
 
 
-def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
+def check_review_roles(
+    url: str, deadline: float, token: str, endpoint: str, workflow_endpoint: str
+) -> None:
+    """Убедиться, что без токена и с ролью operator решение не принимается.
+
+    Создаёт учебного оператора, выдаёт ему токен на один день, получает 403,
+    затем отзывает токен и проверяет 401. Граф после отказов ждёт решения.
+    """
+    try:
+        fetch(
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={"decision": "approve"},
+            expected_status=401,
+        )
+    except SmokeTestError as error:
+        raise SmokeTestError(
+            f"{endpoint}: решение без токена не получило 401"
+        ) from error
+    print(f"OK {endpoint}: решение без токена получает 401")
+    operator = create_smoke_record(
+        token,
+        url,
+        "users",
+        {
+            "name": "Smoke operator",
+            "email": f"smoke-{uuid4().hex[:12]}@example.com",
+            "role": "operator",
+        },
+        deadline,
+    )
+    tokens_endpoint = f"/api/users/{operator['id']}/tokens"
+    issued = json_object(
+        api_fetch(
+            token,
+            f"{url}{tokens_endpoint}",
+            deadline,
+            method="POST",
+            payload={"name": "smoke-operator", "expires_in_days": 1},
+            expected_status=201,
+        ),
+        tokens_endpoint,
+    )
+    operator_token = issued.get("token")
+    if (
+        not isinstance(operator_token, str)
+        or type(issued.get("id")) is not int
+        or issued.get("user_id") != operator["id"]
+    ):
+        raise SmokeTestError(f"{tokens_endpoint}: токен не выдан")
+    try:
+        api_fetch(
+            operator_token,
+            f"{url}{endpoint}",
+            deadline,
+            method="POST",
+            payload={"decision": "approve"},
+            expected_status=403,
+        )
+    except SmokeTestError as error:
+        raise SmokeTestError(f"{endpoint}: роль operator не получила 403") from error
+    print(f"OK {endpoint}: роль operator получает 403")
+    revoke_endpoint = f"/api/tokens/{issued['id']}"
+    revoked = json_object(
+        api_fetch(token, f"{url}{revoke_endpoint}", deadline, method="DELETE"),
+        revoke_endpoint,
+    )
+    if not revoked.get("revoked_at"):
+        raise SmokeTestError(f"{revoke_endpoint}: токен не отозван")
+    try:
+        api_fetch(operator_token, f"{url}/api/auth/me", deadline, expected_status=401)
+    except SmokeTestError as error:
+        raise SmokeTestError("Отозванный токен по-прежнему принимается") from error
+    print(f"OK {revoke_endpoint}: отозванный токен получает 401")
+    waiting = json_object(
+        api_fetch(token, f"{url}{workflow_endpoint}", deadline), workflow_endpoint
+    )
+    if waiting.get("state") != "awaiting_review":
+        raise SmokeTestError(f"{workflow_endpoint}: отказ израсходовал ожидание графа")
+
+
+def check_review(
+    url: str,
+    paths: dict,
+    deadline: float,
+    run: dict,
+    token: str,
+    me: dict,
+    *,
+    verify_roles: bool = True,
+) -> None:
     """Одобрить предложение запуска и проверить доставку и итог графа LangGraph.
 
-    Создаёт учебного сотрудника и сообщение обращения; обращение переходит
-    в waiting_customer. Второе решение обязано получить 409.
+    Автор решения — сотрудник API_TOKEN (reviewer или admin). При verify_roles
+    сначала проверяются отказы без токена и для роли operator: это требует
+    роли admin. Обращение переходит в waiting_customer; второе решение — 409.
     """
     for prefix, suffix, method in (
         ("/api/users", "", "post"),
+        ("/api/users/{", "}/tokens", "post"),
+        ("/api/tokens/{", "}", "delete"),
         ("/api/agent-runs/{", "}/workflow", "get"),
         ("/api/suggestions/{", "}/review", "post"),
     ):
@@ -554,6 +714,12 @@ def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
             raise SmokeTestError(
                 f"/openapi.json: отсутствует операция {method.upper()} {prefix}{suffix}"
             )
+    allowed = {"admin"} if verify_roles else {"reviewer", "admin"}
+    if me.get("role") not in allowed:
+        required = "admin" if verify_roles else "reviewer или admin"
+        raise SmokeTestError(
+            f"Для этой проверки решения нужен токен роли {required} в {TOKEN_ENV}"
+        )
     suggestion = run.get("suggestion")
     if (
         not isinstance(suggestion, dict)
@@ -563,33 +729,28 @@ def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
         or not run["workflow_thread_id"]
     ):
         raise SmokeTestError("Запуск не содержит ожидающего предложения и потока")
-    endpoint = f"/api/agent-runs/{run['id']}/workflow"
-    waiting = json_object(fetch(f"{url}{endpoint}", deadline), endpoint)
+    workflow_endpoint = f"/api/agent-runs/{run['id']}/workflow"
+    waiting = json_object(
+        api_fetch(token, f"{url}{workflow_endpoint}", deadline), workflow_endpoint
+    )
     if (
         waiting.get("state") != "awaiting_review"
         or waiting.get("next") != ["human_review"]
         or waiting.get("thread_id") != run["workflow_thread_id"]
         or waiting.get("suggestion_id") != suggestion["id"]
     ):
-        raise SmokeTestError(f"{endpoint}: граф не ожидает решения сотрудника")
-    print(f"OK {endpoint}: граф LangGraph остановлен на human_review")
-    reviewer = create_smoke_record(
-        url,
-        "users",
-        {"name": "Smoke reviewer", "email": f"smoke-{uuid4().hex[:12]}@example.com"},
-        deadline,
-    )
+        raise SmokeTestError(f"{workflow_endpoint}: граф не ожидает решения сотрудника")
+    print(f"OK {workflow_endpoint}: граф LangGraph остановлен на human_review")
     endpoint = f"/api/suggestions/{suggestion['id']}/review"
+    if verify_roles:
+        check_review_roles(url, deadline, token, endpoint, workflow_endpoint)
     result = json_object(
-        fetch(
+        api_fetch(
+            token,
             f"{url}{endpoint}",
             deadline,
             method="POST",
-            payload={
-                "decision": "approve",
-                "reviewer_id": reviewer["id"],
-                "final_content": REVIEW_TEXT,
-            },
+            payload={"decision": "approve", "final_content": REVIEW_TEXT},
         ),
         endpoint,
     )
@@ -601,11 +762,11 @@ def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
         or not isinstance(message, dict)
         or not isinstance(workflow, dict)
         or reviewed.get("status") != "approved"
-        or reviewed.get("reviewed_by") != reviewer["id"]
+        or reviewed.get("reviewed_by") != me["id"]
         or reviewed.get("final_content") != REVIEW_TEXT
         or reviewed.get("delivered_message_id") != message.get("id")
         or message.get("author_type") != "operator"
-        or message.get("user_id") != reviewer["id"]
+        or message.get("user_id") != me["id"]
         or message.get("content") != REVIEW_TEXT
         or message.get("ticket_id") != run["ticket_id"]
         or result.get("ticket_status") != "waiting_customer"
@@ -613,22 +774,21 @@ def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
         or workflow.get("next") != []
     ):
         raise SmokeTestError(f"{endpoint}: неверный итог одобрения и доставки")
-    print(f"OK {endpoint}: одобрено, сообщение оператора доставлено")
+    print(f"OK {endpoint}: одобрено от имени сотрудника №{me['id']}, ответ доставлен")
     ticket_endpoint = f"/api/tickets/{run['ticket_id']}"
-    ticket = json_object(fetch(f"{url}{ticket_endpoint}", deadline), ticket_endpoint)
+    ticket = json_object(
+        api_fetch(token, f"{url}{ticket_endpoint}", deadline), ticket_endpoint
+    )
     if ticket.get("status") != "waiting_customer":
         raise SmokeTestError(f"{ticket_endpoint}: обращение не ждёт ответа клиента")
     print(f"OK {ticket_endpoint}: статус waiting_customer")
     try:
-        fetch(
+        api_fetch(
+            token,
             f"{url}{endpoint}",
             deadline,
             method="POST",
-            payload={
-                "decision": "reject",
-                "reviewer_id": reviewer["id"],
-                "comment": "Повторное решение",
-            },
+            payload={"decision": "reject", "comment": "Повторное решение"},
             expected_status=409,
         )
     except SmokeTestError as error:
@@ -636,11 +796,13 @@ def check_review(url: str, paths: dict, deadline: float, run: dict) -> None:
     print(f"OK {endpoint}: повторное решение получает 409")
 
 
-def review_existing_run(url: str, paths: dict, deadline: float, run_id: int) -> None:
+def review_existing_run(
+    url: str, paths: dict, deadline: float, run_id: int, token: str, me: dict
+) -> None:
     """Продолжить граф уже сохранённого запуска, например после перезапуска стенда."""
     endpoint = f"/api/agent-runs/{run_id}"
-    run = json_object(fetch(f"{url}{endpoint}", deadline), endpoint)
-    check_review(url, paths, deadline, run)
+    run = json_object(api_fetch(token, f"{url}{endpoint}", deadline), endpoint)
+    check_review(url, paths, deadline, run, token, me, verify_roles=False)
 
 
 def run_checks(
@@ -653,8 +815,13 @@ def run_checks(
     check_knowledge_base: bool = False,
     check_review_flow: bool = False,
     review_run_id: int | None = None,
+    token: str | None = None,
 ) -> None:
-    """Проверить HTTP-контракт и при явном флаге готовность БД за один срок."""
+    """Проверить HTTP-контракт и при явном флаге готовность БД за один срок.
+
+    Режимы, читающие /api/*, требуют token; без него проверка завершается
+    до первого HTTP-запроса с понятной подсказкой про API_TOKEN.
+    """
     # Решение сотрудника проверяется на свежем запуске агента.
     check_agent = check_agent or check_review_flow
     # Агент использует учебные записи и проверку mock из --check-llm,
@@ -664,6 +831,11 @@ def run_checks(
     # Предметное API требует БД, поэтому --check-api включает и /ready.
     check_api = check_api or check_llm or check_knowledge_base or bool(review_run_id)
     check_database = check_database or check_api
+    if check_api and not token:
+        raise SmokeTestError(
+            f"Для проверок /api/* задайте токен сотрудника в {TOKEN_ENV}: "
+            "python -m app.tokens issue …"
+        )
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -722,21 +894,23 @@ def run_checks(
     else:
         print("OK /openapi.json: HTTP 200, title и операция GET /health")
 
-    if check_api:
-        check_business_api(url, paths, deadline)
+    if not check_api:
+        return
+    me = check_authentication(url, paths, deadline, token)
+    check_business_api(url, paths, deadline, token)
     # Все проверки режима (mock LLM, mock-эмбеддинги) выполняются до записей.
     if check_llm:
-        require_mock_llm(url, paths, deadline)
+        require_mock_llm(url, paths, deadline, token)
     if check_knowledge_base:
-        check_knowledge(url, paths, deadline)
+        check_knowledge(url, paths, deadline, token)
     if check_llm:
-        records = check_mock_llm(url, paths, deadline)
+        records = check_mock_llm(url, paths, deadline, token)
         if check_agent:
-            run = check_mock_agent(url, paths, deadline, records)
+            run = check_mock_agent(url, paths, deadline, records, token)
             if check_review_flow:
-                check_review(url, paths, deadline, run)
+                check_review(url, paths, deadline, run, token, me)
     if review_run_id is not None:
-        review_existing_run(url, paths, deadline, review_run_id)
+        review_existing_run(url, paths, deadline, review_run_id, token, me)
 
 
 def use_utf8_output() -> None:
@@ -774,7 +948,10 @@ def main() -> int:
     parser.add_argument(
         "--check-api",
         action="store_true",
-        help="проверить готовность БД и API клиентов, продуктов, лицензий, обращений",
+        help=(
+            "проверить готовность БД, закрытость /api/* без токена и API клиентов, "
+            "продуктов, лицензий, обращений; токен берётся из API_TOKEN"
+        ),
     )
     parser.add_argument(
         "--check-llm",
@@ -804,8 +981,9 @@ def main() -> int:
         "--check-review",
         action="store_true",
         help=(
-            "только mock: одобрить предложение нового запуска, проверить доставку "
-            "и граф LangGraph; включает --check-agent"
+            "только mock: проверить отказы 401/403, одобрить предложение нового "
+            "запуска, доставку и граф LangGraph; нужен токен admin; "
+            "включает --check-agent"
         ),
     )
     parser.add_argument(
@@ -813,7 +991,10 @@ def main() -> int:
         type=positive_id,
         default=None,
         metavar="RUN_ID",
-        help="одобрить ожидающее предложение существующего запуска и проверить итог",
+        help=(
+            "одобрить ожидающее предложение существующего запуска и проверить итог; "
+            "токену в API_TOKEN достаточно роли reviewer"
+        ),
     )
     args = parser.parse_args()
     try:
@@ -827,6 +1008,7 @@ def main() -> int:
             check_knowledge_base=args.check_knowledge,
             check_review_flow=args.check_review,
             review_run_id=args.review_run,
+            token=os.environ.get(TOKEN_ENV, "").strip() or None,
         )
     except SmokeTestError as error:
         print(f"Smoke test провален: {error}", file=sys.stderr)

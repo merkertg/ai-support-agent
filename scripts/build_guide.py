@@ -567,9 +567,9 @@ def cover_page(c, doc):
         [
             ("10 / 10", "этапов дорожной карты готово"),
             (str(doc.verification["tests"]["total"]), "автоматических тестов"),
-            ("25 / 31", "пути / операции HTTP API"),
+            ("28 / 35", "пути / операции HTTP API"),
             ("5", "инструментов агента"),
-            ("4", "миграции базы данных"),
+            ("5", "миграции базы данных"),
         ],
         HEX("#1E293B"),
         WHITE,
@@ -1472,12 +1472,13 @@ def er_diagram(c, w, h):
 
 
 def migrations_timeline(c, w, h):
-    """Четыре миграции Alembic по этапам."""
+    """Пять миграций Alembic по этапам."""
     items = [
         ("0001", "этап 02", "9 таблиц, ключи,\nограничения", ORANGE),
         ("0002", "этап 05", "поля запуска агента:\ntrace, result", VIOLET),
         ("0003", "этап 06", "реестр статей\nбазы знаний", TEAL),
         ("0004", "этап 07", "решение сотрудника +\ncheckpoint LangGraph", GREEN),
+        ("0005", "доступ", "токены сотрудников,\nроль reviewer", BLUE),
     ]
     y = h / 2 + 6
     c.saveState()
@@ -1560,7 +1561,7 @@ def ci_pipeline(c, w, h):
         ),
         (
             "3. container",
-            "API + UI, arm64 QEMU\nTrivy, Compose, smoke\n"
+            "API + UI, arm64 QEMU\nTrivy, SBOM, smoke\n"
             "демо, перезапуск\n4 tested image ID",
             VIOLET_L,
             VIOLET,
@@ -1568,7 +1569,7 @@ def ci_pipeline(c, w, h):
         (
             "4. publish",
             "API/UI amd64+arm64\nmain: SHA и latest\n"
-            "тег: vX.Y.Z\nобщий тег, без сборки",
+            "тег: vX.Y.Z, без сборки\nSBOM; подпись по выбору",
             GREEN_L,
             GREEN,
         ),
@@ -1761,8 +1762,8 @@ def build_story(verification):
                     "Чего не делает",
                     "Не отправляет письма; не меняет обращение без человека; "
                     "не вызывает платную модель по умолчанию (режим "
-                    "mock); пока нет входа "
-                    "сотрудников и прав доступа.",
+                    "mock); не принимает запросы /api/* без токена "
+                    "сотрудника.",
                     ORANGE,
                     ORANGE_L,
                 ),
@@ -2069,7 +2070,7 @@ def build_story(verification):
                 ],
                 [
                     p('<font color="#2563EB"><b>approve</b></font>', CELL),
-                    p("reviewer_id; можно final_content - исправленный текст", CELL),
+                    p("токен reviewer/admin; можно final_content - новый текст", CELL),
                     p(
                         "Предложение approved, сообщение оператора в обращении, статус "
                         "waiting_customer, граф delivered",
@@ -2078,7 +2079,7 @@ def build_story(verification):
                 ],
                 [
                     p('<font color="#C2410C"><b>reject</b></font>', CELL),
-                    p("reviewer_id и обязательный comment с причиной", CELL),
+                    p("токен reviewer/admin и обязательный comment с причиной", CELL),
                     p(
                         "Предложение rejected, обращение без изменений, граф rejected",
                         CELL,
@@ -2092,7 +2093,7 @@ def build_story(verification):
             [
                 (
                     "Проверка до продолжения",
-                    "Неверный сотрудник получает 404, одобрение закрытого "
+                    "Без токена - 401, роль operator - 403, одобрение закрытого "
                     "обращения - 409, а граф продолжает ждать.",
                     GREEN,
                     GREEN_L,
@@ -2124,9 +2125,9 @@ def build_story(verification):
                     ORANGE_L,
                 ),
                 (
-                    "Это не авторизация",
-                    "reviewer_id - учебная отметка. Вход и права "
-                    "сотрудников - будущая работа.",
+                    "Автор из токена",
+                    "Автора решения API берёт из токена сотрудника; поле "
+                    "reviewer_id в теле запрещено (422).",
                     AMBER,
                     AMBER_L,
                 ),
@@ -2148,7 +2149,8 @@ def build_story(verification):
         Spacer(1, 6),
         p(
             "Стрелки - внешние ключи; пунктир - сообщение, "
-            "созданное доставкой одобренного ответа.",
+            "созданное доставкой одобренного ответа. Таблица api_tokens "
+            "(миграция 0005) хранит только SHA-256 токенов и ссылается на users.",
             SMALL,
         ),
         Spacer(1, 10),
@@ -2172,8 +2174,7 @@ def build_story(verification):
         story,
         "8",
         "Шпаргалка API",
-        "25 URL-путей и 31 HTTP-операция. Интерактивная "
-        "документация - http://127.0.0.1:8001/docs.",
+        "28 путей, 35 операций; /api/* - только с токеном. Документация - /docs.",
         BLUE,
     )
 
@@ -2181,8 +2182,7 @@ def build_story(verification):
         [p("Раздел", HEAD), p("Метод", HEAD), p("Путь", HEAD), p("Что делает", HEAD)]
     ]
     for area, verb, path, text in [
-        ("Состояние", "GET", "/health", "Процесс API жив"),
-        ("", "GET", "/ready", "PostgreSQL доступна, миграции актуальны"),
+        ("Состояние", "GET", "/health · /ready", "API жив · БД и миграции готовы"),
         ("Ресурсы", "POST/GET", "/api/customers", "Создать или список клиентов"),
         ("", "POST/GET", "/api/products", "Продукты"),
         (
@@ -2192,7 +2192,7 @@ def build_story(verification):
             "Лицензии (фильтры клиента, продукта, ключа)",
         ),
         ("", "POST/GET", "/api/tickets", "Обращения (новые всегда open)"),
-        ("", "POST/GET", "/api/users", "Сотрудники поддержки"),
+        ("", "POST/GET", "/api/users", "Сотрудники и их роли (создаёт admin)"),
         ("", "GET", "/api/{ресурс}/{id}", "Одна запись любого ресурса выше"),
         ("LLM", "GET", "/api/llm/status", "Какой провайдер настроен"),
         (
@@ -2212,13 +2212,13 @@ def build_story(verification):
             "Агент",
             "POST",
             "/api/tickets/{id}/analyze",
-            "Анализ и граф проверки; 409, если обращение закрыто или ждёт решения",
+            "Анализ и граф проверки; 409 - закрыто или ждёт решения",
         ),
         (
             "",
             "GET",
-            "/api/agent-runs/{id}",
-            "Сохранённый запуск: trace, итог, предложение",
+            "/api/agent-runs[/{id}]",
+            "История (фильтр ticket_id) или один запуск",
         ),
         (
             "Проверка",
@@ -2226,13 +2226,14 @@ def build_story(verification):
             "/api/agent-runs/{id}/workflow",
             "Состояние графа LangGraph",
         ),
-        ("", "GET", "/api/suggestions", "Очередь, фильтры status и ticket_id"),
-        ("", "GET", "/api/suggestions/{id}", "Предложение и решение по нему"),
+        ("", "GET", "/api/suggestions[/{id}]", "Очередь (status, ticket_id) или одно"),
         ("", "POST", "/api/suggestions/{id}/review", "Одобрить или отклонить"),
         ("Оператор", "GET", "/api/dashboard", "Агрегаты всей БД для обзора"),
-        ("", "GET", "/api/agent-runs", "История запусков, фильтр ticket_id"),
         ("", "GET", "/api/tickets/{id}/messages", "Сообщения обращения"),
         ("", "PATCH", "/api/tickets/{id}", "Только смена статуса обращения"),
+        ("Доступ", "GET", "/api/auth/me", "Сотрудник, роль и срок своего токена"),
+        ("", "POST/GET", "/api/users/{id}/tokens", "Выдать токен или список (admin)"),
+        ("", "DELETE", "/api/tokens/{id}", "Отозвать токен (admin)"),
     ]:
         verbs = p(
             " / ".join(
@@ -2260,26 +2261,26 @@ def build_story(verification):
                 [
                     p("<b>200 / 201</b>", CELL),
                     p("успех / запись создана", CELL),
-                    p("<b>413</b>", CELL),
-                    p("контекст для модели слишком большой", CELL),
+                    p("<b>401 / 403</b>", CELL),
+                    p("нет действующего токена / роль ниже нужной", CELL),
                 ],
                 [
                     p("<b>404</b>", CELL),
                     p("запись не найдена", CELL),
+                    p("<b>413 / 429</b>", CELL),
+                    p("контекст велик / лимит изменений в минуту", CELL),
+                ],
+                [
+                    p("<b>409</b>", CELL),
+                    p("дубликат, решение принято, обращение закрыто", CELL),
                     p("<b>502</b>", CELL),
                     p("непригодный ответ модели или чужая ссылка", CELL),
                 ],
                 [
-                    p("<b>409</b>", CELL),
-                    p("конфликт: дубликат, решение принято, обращение закрыто", CELL),
-                    p("<b>503</b>", CELL),
-                    p("БД, Qdrant или провайдер недоступны", CELL),
-                ],
-                [
                     p("<b>422</b>", CELL),
                     p("неверный запрос: поля, типы, лишнее", CELL),
-                    p("<b>504</b>", CELL),
-                    p("истёк тайм-аут модели или поиска", CELL),
+                    p("<b>503 / 504</b>", CELL),
+                    p("БД, Qdrant, провайдер недоступны / тайм-аут", CELL),
                 ],
             ],
             [54, W / 2 - 54, 54, W / 2 - 54],
@@ -2316,16 +2317,17 @@ def build_story(verification):
         ),
         (
             "4",
-            "Проверить всё одной командой",
-            "uv run --locked python scripts/smoke_test.py \\\n"
-            "  --base-url http://127.0.0.1:8001 --timeout 60 --check-review",
-            "Создаёт учебные записи: не запускай на рабочей базе.",
+            "Выдать токен администратора",
+            'export API_TOKEN="$(docker compose exec -T api python -m \\\n'
+            '  app.tokens issue --email admin@example.com --name Admin --role admin)"',
+            "Показывается один раз; им же входят в UI и Swagger (Authorize).",
         ),
         (
             "5",
-            "Открыть Swagger",
-            "open http://127.0.0.1:8001/docs",
-            "Там можно вызвать любой маршрут из браузера.",
+            "Проверить всё одной командой",
+            "uv run --locked python scripts/smoke_test.py \\\n"
+            "  --base-url http://127.0.0.1:8001 --timeout 60 --check-review",
+            "Токен берёт из API_TOKEN; создаёт учебные записи - не на рабочей базе.",
         ),
     ]:
         story.append(
@@ -2524,8 +2526,8 @@ def build_story(verification):
         callout(
             "<b>Изменения - только по явной форме.</b> Перерисовка страницы не "
             "повторяет анализ и решение; вызов реальной модели требует отдельного "
-            "подтверждения; POST не повторяется автоматически. ID сотрудника в "
-            "боковой панели - учебная отметка автора, а не вход в систему.",
+            "подтверждения; POST не повторяется автоматически. Вход - токеном "
+            "сотрудника в боковой панели; форма решения - только reviewer и admin.",
             VIOLET,
             VIOLET_L,
         ),
@@ -2610,7 +2612,8 @@ def build_story(verification):
         Diagram(62, demo_flow),
         Spacer(1, 6),
         p(
-            "Скрипт проверяет mock и индекс, создаёт или переиспользует вымышленные "
+            "Скрипт работает от имени сотрудника токена API_TOKEN, проверяет mock "
+            "и индекс, создаёт или переиспользует вымышленные "
             "записи и оставляет одно предложение pending. Решение принимает человек "
             "в интерфейсе; повтор скрипта ничего не дублирует. Порядок показа - "
             "docs/DEMO.md.",
@@ -2776,7 +2779,7 @@ def append_audit_pages(story, verification):
                 ),
                 ("Unit / интеграционные", f"{tests['unit']} / {tests['integration']}"),
                 ("Smoke CLI (входит в unit)", tests["smoke_cli"]),
-                ("Контракт HTTP", "25 URL-путей, 31 операция"),
+                ("Контракт HTTP", "28 URL-путей, 35 операций"),
             ],
             [210, W - 210],
         ),
@@ -2795,11 +2798,9 @@ def append_audit_pages(story, verification):
         Spacer(1, 8),
         p("Как читать эту страницу", H2),
         p(
-            "Число тестов показывает объём автоматических "
-            "сценариев. Оно не измеряет качество "
-            "ответов настоящей модели. Для GitHub нужен результат "
-            "запуска именно итогового коммита; "
-            "локальный успех и наличие YAML не подтверждают публикацию нового образа.",
+            "Тесты проверяют сценарии, а не качество настоящей модели. "
+            "Публикацию подтверждает успешный Actions итогового SHA; "
+            "локального прогона для этого недостаточно.",
             BODY_S,
         ),
     ]
@@ -2903,7 +2904,7 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Доставка",
-                    "4 tested образа; сверить ID и платформы",
+                    "4 tested образа и SBOM; cosign по выбору",
                     "Проверенные сборки под общим тегом",
                 ),
             ],
@@ -2942,7 +2943,8 @@ def append_audit_pages(story, verification):
             [
                 (
                     "Права GitHub",
-                    "CI: contents: read; packages: write только в publish",
+                    "CI: contents: read; packages: write и id-token: write "
+                    "только в publish",
                 ),
                 (
                     "Внешние Actions",
@@ -2983,6 +2985,16 @@ def append_audit_pages(story, verification):
                     "Push тега из истории main; конфликт образа запрещён; "
                     "latest не меняется",
                 ),
+                (
+                    "Подпись и SBOM",
+                    "SBOM Trivy всегда проверяется. Публичная подпись выключена; "
+                    "включение: GHCR_PUBLIC_SIGNING=true (Rekor)",
+                ),
+                (
+                    "Очистка GHCR",
+                    "SHA-версии старше 30 дней: план по воскресеньям, удаление "
+                    "по явному разрешению; latest и vX.Y.Z не трогаются",
+                ),
             ],
             [130, W - 130],
         ),
@@ -3017,10 +3029,10 @@ def append_audit_pages(story, verification):
         p("Граница реализованной защиты", H2),
         p(
             "Аудит зависимостей ищет известные уязвимости на дату "
-            "проверки. Проверки не заменяют авторизацию, а оценки "
-            "не измеряют качество реальной модели. reviewer_id "
-            "остаётся учебной отметкой; "
-            "входа сотрудников и прав доступа ещё нет. CD "
+            "проверки. Оценки не измеряют качество реальной модели. "
+            "API закрыт токенами сотрудников (хранится только SHA-256) "
+            "с ролями operator/reviewer/admin и лимитом изменений; входа "
+            "через SSO нет. CD "
             "заканчивается в GHCR: внешняя "
             "площадка развёртывания пока не выбрана.",
             BODY_S,
@@ -3070,6 +3082,8 @@ def append_audit_pages(story, verification):
             "docker compose up --build --detach --wait --wait-timeout 180 ui\n"
             "docker compose exec -T api python -m app.knowledge.ingest\n"
             "docker compose exec -T api python -m alembic check\n"
+            'export API_TOKEN="$(docker compose exec -T api python -m app.tokens \\\n'
+            '  issue --email admin@example.com --name Admin --role admin)"\n'
             "uv run --locked python scripts/smoke_test.py \\\n"
             "  --base-url http://127.0.0.1:8001 \\\n"
             "  --timeout 60 --check-review"
@@ -3077,8 +3091,9 @@ def append_audit_pages(story, verification):
         Spacer(1, 9),
         callout(
             "Ожидается код завершения 0 у всех команд, ноль пропусков в полном Pytest, "
-            "миграции без различий и успешные шаги smoke. --check-review создаёт "
-            "учебные записи: выполняй на учебном стенде. Без TEST URLs локальные "
+            "миграции без различий и успешные шаги smoke. --check-review нужен "
+            "токен admin; он проверяет 401/403 и создаёт учебные записи: выполняй "
+            "на учебном стенде. Без TEST URLs локальные "
             "интеграционные тесты пропускаются; CI=true "
             "превращает отсутствие адресов в ошибку.",
             TEAL,
@@ -3096,8 +3111,9 @@ def append_audit_pages(story, verification):
     )
     story += [
         p(
-            "Открой http://127.0.0.1:8001/docs. В нужной операции нажми Try it out, "
-            "заполни JSON и Execute. ID бери из ответов: они "
+            "Открой http://127.0.0.1:8001/docs, нажми Authorize и вставь токен "
+            "администратора (python -m app.tokens issue). В нужной операции нажми "
+            "Try it out, заполни JSON и Execute. ID бери из ответов: они "
             "различаются на разных стендах.",
             BODY_S,
         ),
@@ -3124,8 +3140,8 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "4. POST /api/users",
-                    "name и новый email сотрудника. Сохранить "
-                    "reviewer_id; role по умолчанию operator",
+                    "name, новый email и role=reviewer; затем POST "
+                    "/api/users/{id}/tokens - токен рецензента (виден один раз)",
                 ),
                 (
                     "5. POST /api/tickets",
@@ -3144,8 +3160,8 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "8. POST /api/suggestions/{id}/review",
-                    "decision=approve, reviewer_id; можно final_content с "
-                    "исправленным ответом",
+                    "Authorize токеном рецензента; decision=approve, можно "
+                    "final_content. Автор решения - владелец токена",
                 ),
                 (
                     "9. Проверить результат",
@@ -3163,8 +3179,8 @@ def append_audit_pages(story, verification):
         p("Отдельно пройти отклонение", H2),
         p(
             "Создай второе обращение и запусти анализ. Для pending предложения передай "
-            "decision=reject, reviewer_id и обязательный comment "
-            "с причиной; final_content "
+            "decision=reject и обязательный comment "
+            "с причиной (токен reviewer или admin); final_content "
             "не передавай. Ожидаются rejected, message=null, обращение остаётся open. "
             "Пошаговые curl-блоки с сохранением ID находятся в "
             "docs/STAGE_07.md, разделы 9-10.",
@@ -3316,9 +3332,9 @@ def append_audit_pages(story, verification):
                     "Сверить схему Swagger; reject требует comment",
                 ),
                 (
-                    "HTTP 404 reviewer",
-                    "Сотрудник существует и активен",
-                    "Выбрать действующий reviewer_id",
+                    "HTTP 401 / 403 / 429",
+                    "Bearer-токен, срок и отзыв, роль, лимит в минуту",
+                    "Новый токен (app.tokens issue), роль или пауза",
                 ),
                 (
                     "HTTP 409",
@@ -3431,6 +3447,7 @@ def append_audit_pages(story, verification):
             "docker compose logs --since 10m api\n"
             'read -r -p "ID проверяемого запуска: " RUN_ID\n'
             "curl --fail-with-body \\\n"
+            '  -H "Authorization: Bearer $API_TOKEN" \\\n'
             '  "http://127.0.0.1:8001/api/agent-runs/$RUN_ID"'
         ),
         Spacer(1, 7),
@@ -3527,14 +3544,27 @@ def append_audit_pages(story, verification):
             "сборки в publish нет. Существующий "
             "version-тег с другим image ID останавливает доставку. Повтор "
             "идентичного образа разрешён. Релиз не двигает latest; main публикует "
-            "sha-&lt;полный SHA&gt; и latest только для своей текущей вершины.",
+            "sha-&lt;полный SHA&gt; и latest только для своей текущей вершины. "
+            "Публичная подпись выключена по выбору пользователя. "
+            "GHCR_PUBLIC_SIGNING=true включает cosign keyless и SBOM attestations; "
+            "metadata появятся в Rekor. Проверка: docs/RELEASES.md, раздел 5.",
+            BODY_S,
+        ),
+        Spacer(1, 7),
+        p("3. Очистка старых SHA-образов", H2),
+        p(
+            "Clean up old GHCR SHA images по воскресеньям строит план: SHA-версии "
+            "main старше 30 дней вместе с их подписями. latest, vX.Y.Z и всё, на "
+            "что они ссылаются, остаются. По умолчанию dry-run; удаление — "
+            "отметка delete при ручном запуске или GHCR_CLEANUP_DELETE=true.",
             BODY_S,
         ),
         Spacer(1, 7),
         callout(
             "CI настраивает доставку, но локальная проверка не доказывает результат "
-            "GitHub. Подтверди шесть jobs итогового коммита и оба пакета GHCR в "
-            "Actions Summary. Тег и GitHub Release автоматически не создаются.",
+            "GitHub. Подтверди шесть jobs итогового коммита, оба пакета GHCR и "
+            "статус выключенной подписи в Actions Summary. Тег и GitHub Release "
+            "автоматически не создаются.",
             VIOLET,
             VIOLET_L,
         ),
@@ -3560,9 +3590,9 @@ def append_audit_pages(story, verification):
                     "локально; тот же набор оценок с отчётом о стоимости",
                 ),
                 (
-                    "Вход и роли",
-                    "Сервер проверяет личность и право принимать решение; "
-                    "reviewer_id из доверенного контекста",
+                    "Вход через SSO",
+                    "OIDC поверх готовых ролей и токенов; общий лимит "
+                    "изменений в шлюзе или Redis; TLS на внешнем адресе",
                 ),
                 (
                     "Настоящая доставка",
@@ -3571,7 +3601,8 @@ def append_audit_pages(story, verification):
                 ),
                 (
                     "Подтвердить удалённый CI",
-                    "Шесть успешных jobs итогового SHA и оба API/UI пакета GHCR",
+                    "Шесть успешных jobs итогового SHA, оба пакета GHCR, SBOM "
+                    "и первый dry-run очистки",
                 ),
                 (
                     "Внешний сервер",

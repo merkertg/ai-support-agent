@@ -1,9 +1,15 @@
 """HTTP-контракт панели оператора: сервер остаётся владельцем бизнес-данных."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.dependencies import ApiSession
 from app.api.routes import FilterId, Limit, Offset, ResourceId
+from app.api.security import (
+    AUTH_RESPONSES,
+    WRITE_RESPONSES,
+    get_principal,
+    operator_writer,
+)
 from app.schemas.agents import AgentRunRead
 from app.schemas.operator import DashboardRead, TicketStatusUpdate
 from app.schemas.resources import ErrorRead, TicketRead
@@ -13,7 +19,9 @@ from app.services import operator
 router = APIRouter(
     prefix="/api",
     tags=["Operator"],
-    responses={503: {"model": ErrorRead, "description": "База данных недоступна"}},
+    dependencies=[Depends(get_principal)],
+    responses=AUTH_RESPONSES
+    | {503: {"model": ErrorRead, "description": "База данных недоступна"}},
 )
 
 
@@ -52,7 +60,9 @@ def get_messages(
 @router.patch(
     "/tickets/{resource_id}",
     response_model=TicketRead,
-    responses={404: {"model": ErrorRead, "description": "Обращение не найдено"}},
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES
+    | {404: {"model": ErrorRead, "description": "Обращение не найдено"}},
 )
 def patch_ticket(
     resource_id: ResourceId, payload: TicketStatusUpdate, session: ApiSession

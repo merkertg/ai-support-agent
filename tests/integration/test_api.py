@@ -16,7 +16,9 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def client(migrated_engine: Engine) -> Iterator[TestClient]:
+def client(
+    migrated_engine: Engine, staff_headers: dict[str, str]
+) -> Iterator[TestClient]:
     """Выдать каждому HTTP-запросу отдельную сессию из проверенной тестовой БД."""
 
     def session_override() -> Iterator[Session]:
@@ -31,7 +33,7 @@ def client(migrated_engine: Engine) -> Iterator[TestClient]:
     previous_overrides = app.dependency_overrides.copy()
     app.dependency_overrides[get_api_session] = session_override
     try:
-        with TestClient(app) as test_client:
+        with TestClient(app, headers=staff_headers) as test_client:
             yield test_client
     finally:
         # Не оставляем тестовую сессию другим проверкам /health и /ready.

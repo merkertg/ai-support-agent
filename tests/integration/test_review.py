@@ -1,7 +1,9 @@
 """Решение сотрудника на настоящей PostgreSQL: LangGraph PostgresSaver и доставка."""
 
 import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic import command
@@ -27,7 +29,10 @@ from app.models import (
     User,
 )
 from app.observability import INTERNAL_ERROR
+from app.schemas.reviews import ReviewRequest
 from app.services import agents, reviews
+from app.services.errors import ResourceForbidden, ResourceNotFound
+from app.workflow import service as workflow
 from app.workflow.checkpoint import open_saver
 
 pytestmark = pytest.mark.integration
@@ -77,7 +82,9 @@ def savers(test_database_url: str, migrated_engine: Engine) -> Iterator[Savers]:
 
 
 @pytest.fixture
-def client(migrated_engine: Engine, savers: Savers) -> Iterator[TestClient]:
+def client(
+    migrated_engine: Engine, savers: Savers, staff_headers: dict[str, str]
+) -> Iterator[TestClient]:
     """HTTP-клиент: сессии и checkpointer указывают на тестовую БД *_test."""
 
     def session_override() -> Iterator[Session]:
@@ -89,7 +96,7 @@ def client(migrated_engine: Engine, savers: Savers) -> Iterator[TestClient]:
     app.dependency_overrides[get_api_session] = session_override
     app.dependency_overrides[get_checkpointer_factory] = lambda: lambda: savers.saver
     try:
-        with TestClient(app) as http:
+        with TestClient(app, headers=staff_headers) as http:
             yield http
     finally:
         app.dependency_overrides.clear()
@@ -116,11 +123,27 @@ def ticket(client: TestClient) -> dict:
     ).json()
 
 
-def reviewer(client: TestClient, email: str = "operator@example.com") -> dict:
-    """Создать сотрудника через API."""
-    response = client.post("/api/users", json={"name": "Оператор", "email": email})
+def bearer(token: str) -> dict[str, str]:
+    """Заголовок запроса от имени сотрудника с этим токеном."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def reviewer(
+    client: TestClient, email: str = "reviewer@example.com", role: str = "reviewer"
+) -> dict:
+    """Создать сотрудника и выдать ему токен через API администратора.
+
+    В словаре сотрудника добавлен ключ headers: решение отправляется с этим
+    заголовком, и API записывает автором именно этого сотрудника.
+    """
+    response = client.post(
+        "/api/users", json={"name": "Рецензент", "email": email, "role": role}
+    )
     assert response.status_code == 201, response.text
-    return response.json()
+    user = response.json()
+    issued = client.post(f"/api/users/{user['id']}/tokens", json={"name": "tests"})
+    assert issued.status_code == 201, issued.text
+    return user | {"headers": bearer(issued.json()["token"])}
 
 
 def analyze(client: TestClient, ticket: dict, body: dict | None = None) -> dict:
@@ -143,11 +166,18 @@ def message_count(engine: Engine) -> int:
 
 
 def test_users_api_creates_lists_and_reads(client: TestClient) -> None:
-    """Сотрудник создаётся с ролью operator; повтор email — 409."""
-    created = reviewer(client)
+    """Сотрудник создаётся с ролью operator по умолчанию; повтор email — 409."""
+    response = client.post(
+        "/api/users", json={"name": "Оператор", "email": "operator@example.com"}
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
     assert created["role"] == "operator" and created["is_active"] is True
     assert client.get(f"/api/users/{created['id']}").json() == created
-    assert client.get("/api/users").json() == [created]
+    # Первый сотрудник — администратор, чей токен использует клиент теста.
+    listed = client.get("/api/users").json()
+    assert [user["role"] for user in listed] == ["admin", "operator"]
+    assert listed[1] == created
     duplicate = client.post(
         "/api/users", json={"name": "Другой", "email": "operator@example.com"}
     )
@@ -190,10 +220,10 @@ def test_approval_delivers_edited_reply_and_finishes_workflow(
         f"/api/suggestions/{run['suggestion']['id']}/review",
         json={
             "decision": "approve",
-            "reviewer_id": user["id"],
             "final_content": "Здравствуйте! Проверьте, свободен ли порт 8443.",
             "comment": "Сократил черновик",
         },
+        headers=user["headers"],
     )
     assert response.status_code == 200, response.text
     result = response.json()
@@ -230,7 +260,8 @@ def test_rejection_keeps_ticket_and_creates_no_message(
     user = reviewer(client)
     response = client.post(
         f"/api/suggestions/{run['suggestion']['id']}/review",
-        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Неточно"},
+        json={"decision": "reject", "comment": "Неточно"},
+        headers=user["headers"],
     )
     assert response.status_code == 200, response.text
     result = response.json()
@@ -244,34 +275,80 @@ def test_rejection_keeps_ticket_and_creates_no_message(
         assert session.scalar(select(func.count()).select_from(TicketMessage)) == 0
 
 
-def test_invalid_reviewer_keeps_workflow_waiting(
+def test_unauthorized_reviewers_keep_workflow_waiting(
     client: TestClient, ticket: dict, migrated_engine: Engine
 ) -> None:
-    """Неизвестный или неактивный сотрудник не расходует ожидание графа."""
+    """Без токена, с ролью operator или у неактивного сотрудника решения нет.
+
+    Ни один отказ не расходует ожидание графа: после него рецензент
+    по-прежнему может принять решение.
+    """
     run = analyze(client, ticket)
-    suggestion_id = run["suggestion"]["id"]
-    missing = client.post(
-        f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": 999},
+    path = f"/api/suggestions/{run['suggestion']['id']}/review"
+    anonymous = client.post(
+        path, json={"decision": "approve"}, headers={"Authorization": ""}
     )
-    assert missing.status_code == 404
-    assert missing.json() == {"detail": "Сотрудник не найден"}
+    assert anonymous.status_code == 401
+    assert anonymous.headers["WWW-Authenticate"] == "Bearer"
+    operator = reviewer(client, "operator@example.com", role="operator")
+    forbidden = client.post(
+        path, json={"decision": "approve"}, headers=operator["headers"]
+    )
+    assert forbidden.status_code == 403, forbidden.text
     inactive = reviewer(client, "inactive@example.com")
     with Session(migrated_engine) as session, session.begin():
         session.get(User, inactive["id"]).is_active = False
     blocked = client.post(
-        f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": inactive["id"]},
+        path, json={"decision": "approve"}, headers=inactive["headers"]
     )
-    assert blocked.status_code == 409
+    assert blocked.status_code == 401
+    spoofed = client.post(
+        path,
+        json={"decision": "approve", "reviewer_id": inactive["id"]},
+        headers=operator["headers"],
+    )
+    assert spoofed.status_code == 403
     workflow = client.get(f"/api/agent-runs/{run['id']}/workflow").json()
     assert workflow["state"] == "awaiting_review"
+    assert message_count(migrated_engine) == 0
     active = reviewer(client)
+    # Правильный токен не позволяет подставить другого автора в теле запроса.
+    impostor = client.post(
+        path,
+        json={"decision": "approve", "reviewer_id": operator["id"]},
+        headers=active["headers"],
+    )
+    assert impostor.status_code == 422
     approved = client.post(
-        f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": active["id"]},
+        path, json={"decision": "approve"}, headers=active["headers"]
     )
     assert approved.status_code == 200, approved.text
+    assert approved.json()["suggestion"]["reviewed_by"] == active["id"]
+    assert approved.json()["message"]["user_id"] == active["id"]
+
+
+def test_service_rechecks_reviewer_in_database(
+    client: TestClient, ticket: dict, savers: Savers, migrated_engine: Engine
+) -> None:
+    """Сервис под блокировкой перечитывает сотрудника: роль и существование."""
+    run = analyze(client, ticket)
+    operator = reviewer(client, "operator@example.com", role="operator")
+    request = ReviewRequest(decision="approve")
+    with Session(migrated_engine) as session:
+        with pytest.raises(ResourceForbidden):
+            workflow.review_suggestion(
+                session,
+                run["suggestion"]["id"],
+                request,
+                lambda: savers.saver,
+                operator["id"],
+            )
+        with pytest.raises(ResourceNotFound):
+            workflow.review_suggestion(
+                session, run["suggestion"]["id"], request, lambda: savers.saver, 999
+            )
+    state = client.get(f"/api/agent-runs/{run['id']}/workflow").json()
+    assert state["state"] == "awaiting_review"
 
 
 def test_second_decision_and_unknown_suggestion_are_refused(
@@ -281,16 +358,19 @@ def test_second_decision_and_unknown_suggestion_are_refused(
     run = analyze(client, ticket)
     user = reviewer(client)
     path = f"/api/suggestions/{run['suggestion']['id']}/review"
-    first = client.post(path, json={"decision": "approve", "reviewer_id": user["id"]})
+    first = client.post(path, json={"decision": "approve"}, headers=user["headers"])
     assert first.status_code == 200
     second = client.post(
-        path, json={"decision": "reject", "reviewer_id": user["id"], "comment": "Нет"}
+        path,
+        json={"decision": "reject", "comment": "Нет"},
+        headers=user["headers"],
     )
     assert second.status_code == 409
     assert second.json() == {"detail": "Предложение уже рассмотрено"}
     unknown = client.post(
         "/api/suggestions/9999/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert unknown.status_code == 404
 
@@ -304,7 +384,8 @@ def test_review_resumes_after_checkpointer_restart(
     user = reviewer(client)
     response = client.post(
         f"/api/suggestions/{run['suggestion']['id']}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert response.status_code == 200, response.text
     assert response.json()["workflow"]["state"] == "delivered"
@@ -325,7 +406,7 @@ def test_parallel_decisions_deliver_exactly_once(
         barrier.wait()
         statuses.append(
             client.post(
-                path, json={"decision": "approve", "reviewer_id": user["id"]}
+                path, json={"decision": "approve"}, headers=user["headers"]
             ).status_code
         )
 
@@ -384,7 +465,8 @@ def test_legacy_suggestion_without_thread_is_reviewed_directly(
     user = reviewer(client)
     response = client.post(
         f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert response.status_code == 200, response.text
     assert response.json()["workflow"] is None
@@ -495,7 +577,8 @@ def test_missing_checkpoint_is_restored_before_review(
     user = reviewer(client)
     approved = client.post(
         f"/api/suggestions/{run['suggestion']['id']}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert approved.status_code == 200, approved.text
     with Session(migrated_engine) as session:
@@ -588,8 +671,8 @@ def test_checkpoint_outage_after_review_does_not_repeat_delivery(
 
     monkeypatch.setattr(reviews, "apply_review", committed_review)
     path = f"/api/suggestions/{run['suggestion']['id']}/review"
-    body = {"decision": decision, "reviewer_id": user["id"], "comment": "Проверено"}
-    outage = client.post(path, json=body)
+    body = {"decision": decision, "comment": "Проверено"}
+    outage = client.post(path, json=body, headers=user["headers"])
     assert outage.status_code == 500, outage.text
     assert outage.json() == {"detail": INTERNAL_ERROR}
     fault["failed"] = False
@@ -599,7 +682,7 @@ def test_checkpoint_outage_after_review_does_not_repeat_delivery(
         "delivered" if decision == "approve" else "rejected"
     )
     assert state.json()["next"] == []
-    assert client.post(path, json=body).status_code == 409
+    assert client.post(path, json=body, headers=user["headers"]).status_code == 409
     with Session(migrated_engine) as session:
         expected = 1 if decision == "approve" else 0
         assert (
@@ -618,7 +701,8 @@ def test_review_recovers_pending_checkpoint_without_prior_get(
     savers.saver.delete_thread(run["workflow_thread_id"])
     response = client.post(
         f"/api/suggestions/{run['suggestion']['id']}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert response.status_code == 200, response.text
     assert response.json()["workflow"]["state"] == "delivered"
@@ -646,12 +730,13 @@ def test_pending_after_rolled_back_review_can_receive_new_decision(
 
     monkeypatch.setattr(reviews, "apply_review", failed_transaction)
     path = f"/api/suggestions/{run['suggestion']['id']}/review"
-    failed = client.post(path, json={"decision": "approve", "reviewer_id": user["id"]})
+    failed = client.post(path, json={"decision": "approve"}, headers=user["headers"])
     assert failed.status_code == 503, failed.text
     monkeypatch.setattr(reviews, "apply_review", original_apply)
     retried = client.post(
         path,
-        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Исправить"},
+        json={"decision": "reject", "comment": "Исправить"},
+        headers=user["headers"],
     )
     assert retried.status_code == 200, retried.text
     assert retried.json()["workflow"]["state"] == "rejected"
@@ -688,7 +773,8 @@ def test_closed_ticket_suggestion_can_only_be_rejected(
     set_ticket_status(client, ticket, status)
     approve = client.post(
         f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert approve.status_code == 409, approve.text
     assert approve.json() == {"detail": reviews.TICKET_CLOSED}
@@ -696,7 +782,8 @@ def test_closed_ticket_suggestion_can_only_be_rejected(
     assert workflow["state"] == "awaiting_review"
     reject = client.post(
         f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Закрыто"},
+        json={"decision": "reject", "comment": "Закрыто"},
+        headers=user["headers"],
     )
     assert reject.status_code == 200, reject.text
     result = reject.json()
@@ -735,7 +822,8 @@ def test_ticket_closed_after_precheck_is_not_delivered(
     monkeypatch.setattr(reviews, "check_reviewable", close_after_check)
     approve = client.post(
         f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "approve", "reviewer_id": user["id"]},
+        json={"decision": "approve"},
+        headers=user["headers"],
     )
     assert approve.status_code == 409, approve.text
     assert approve.json() == {"detail": reviews.TICKET_CLOSED}
@@ -745,7 +833,8 @@ def test_ticket_closed_after_precheck_is_not_delivered(
     assert workflow["state"] == "awaiting_review"
     reject = client.post(
         f"/api/suggestions/{suggestion_id}/review",
-        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Закрыто"},
+        json={"decision": "reject", "comment": "Закрыто"},
+        headers=user["headers"],
     )
     assert reject.status_code == 200, reject.text
     assert reject.json()["workflow"]["state"] == "rejected"
@@ -762,10 +851,86 @@ def test_new_analysis_is_allowed_after_decision(
     assert blocked.status_code == 409, blocked.text
     rejected = client.post(
         f"/api/suggestions/{run['suggestion']['id']}/review",
-        json={"decision": "reject", "reviewer_id": user["id"], "comment": "Неточно"},
+        json={"decision": "reject", "comment": "Неточно"},
+        headers=user["headers"],
     )
     assert rejected.status_code == 200, rejected.text
     second = analyze(client, ticket)
     assert second["id"] != run["id"]
     queue = client.get("/api/suggestions", params={"status": "pending"}).json()
     assert [item["id"] for item in queue] == [second["suggestion"]["id"]]
+
+
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        ({"role": "operator"}, ResourceForbidden),
+        ({"is_active": False}, ResourceNotFound),
+    ],
+)
+def test_delivery_rechecks_staff_after_waiting_for_concurrent_change(
+    client: TestClient,
+    ticket: dict,
+    migrated_engine: Engine,
+    change: dict,
+    failure: type[Exception],
+) -> None:
+    """Понижение роли/отключение в другой транзакции запрещает позднюю доставку.
+
+    Сессия доставки уже кеширует прежние права. Изменение сотрудника удерживает
+    строку, поэтому FOR SHARE реально ждёт PostgreSQL, затем перечитывает
+    завершённое изменение вместо доверия старому объекту из identity map.
+    """
+    run = analyze(client, ticket)
+    user = reviewer(client, "concurrent-role@example.com")
+    ready = threading.Event()
+    proceed = threading.Event()
+    backend_pid: list[int] = []
+
+    def deliver() -> None:
+        """Кешировать рецензента и попытаться доставить после начала его изменения."""
+        # Закрепляем соединение, чтобы pg_stat_activity наблюдал именно тот PID,
+        # который впоследствии будет выполнять SELECT ... FOR SHARE.
+        with migrated_engine.connect() as connection:
+            with Session(bind=connection, expire_on_commit=False) as session:
+                cached = session.get(User, user["id"])
+                assert cached.role == "reviewer" and cached.is_active
+                backend_pid.append(session.scalar(select(func.pg_backend_pid())))
+                session.commit()
+                ready.set()
+                assert proceed.wait(timeout=5)
+                with pytest.raises(failure):
+                    reviews.apply_review(
+                        session,
+                        run["suggestion"]["id"],
+                        {"decision": "approve", "reviewer_id": user["id"]},
+                    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(deliver)
+        assert ready.wait(timeout=5)
+        with migrated_engine.begin() as writer:
+            writer.execute(update(User).where(User.id == user["id"]).values(**change))
+            proceed.set()
+            blocked = False
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with migrated_engine.connect() as observer:
+                    blocked = bool(
+                        observer.exec_driver_sql(
+                            "SELECT wait_event_type = 'Lock' FROM pg_stat_activity "
+                            "WHERE pid = %s",
+                            (backend_pid[0],),
+                        ).scalar()
+                    )
+                if blocked:
+                    break
+                time.sleep(0.01)
+            assert blocked, "Доставка не дождалась блокировки сотрудника в PostgreSQL"
+        future.result(timeout=5)
+    with Session(migrated_engine) as session:
+        suggestion = session.get(AgentSuggestion, run["suggestion"]["id"])
+        assert suggestion.status == "pending"
+        assert suggestion.reviewed_by is None
+        assert session.scalar(select(func.count()).select_from(TicketMessage)) == 0
+        assert session.get(Ticket, ticket["id"]).status == ticket["status"]

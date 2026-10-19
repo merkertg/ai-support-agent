@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.api.agents import agent_error_handler
 from app.api.agents import router as agents_router
+from app.api.auth import router as auth_router
 from app.api.drafts import llm_error_handler
 from app.api.drafts import router as drafts_router
 from app.api.errors import database_error_handler, resource_error_handler
@@ -151,13 +152,15 @@ def ready(
     return {"status": "ok", "database": "ok"}
 
 
-# REST-слой подключаем отдельно: проверки /health и /ready сохраняют свой контракт.
+# REST-слой подключаем отдельно: /health и /ready остаются без токена,
+# а каждый маршрут /api/* требует токен сотрудника (app/api/security.py).
 app.include_router(api_router)
 app.include_router(drafts_router)
 app.include_router(agents_router)
 app.include_router(knowledge_router)
 app.include_router(reviews_router)
 app.include_router(operator_router)
+app.include_router(auth_router)
 app.add_exception_handler(AgentRunFailure, agent_error_handler)
 app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(ResourceError, resource_error_handler)

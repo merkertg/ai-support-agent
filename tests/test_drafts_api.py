@@ -301,9 +301,12 @@ def test_openapi_documents_draft_preview_and_all_expected_errors() -> None:
     assert "requestBody" not in operation
     assert set(operation["responses"]) == {
         "200",
+        "401",
+        "403",
         "404",
         "413",
         "422",
+        "429",
         "502",
         "503",
         "504",

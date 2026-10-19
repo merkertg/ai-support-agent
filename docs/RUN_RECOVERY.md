@@ -128,7 +128,8 @@ docker compose logs --since 10m api
 Посмотреть известный запуск:
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8001/api/agent-runs/1
+curl --fail-with-body --header "Authorization: Bearer $API_TOKEN" \
+  http://127.0.0.1:8001/api/agent-runs/1
 ```
 
 Подставь настоящий `run_id`. Для восстановленного запуска ожидаются `failed`,

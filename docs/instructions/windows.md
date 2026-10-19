@@ -36,6 +36,8 @@ Replace `path\to\ai-support-agent` with the folder where you cloned the reposito
 | --- | --- |
 | `cp -n .env.example .env` or `if [ ! -f .env ]; then cp .env.example .env; fi` | `if (-not (Test-Path .env)) { Copy-Item .env.example .env }` |
 | `export NAME=value` | `$env:NAME = 'value'` |
+| `export API_TOKEN="$(command)"` | `$env:API_TOKEN = command` (stdout of the command becomes the value) |
+| `--header "Authorization: Bearer $API_TOKEN"` | `-Headers @{ Authorization = "Bearer $env:API_TOKEN" }` |
 | `NAME=value command` (only for one command) | `$env:NAME = 'value'; command; Remove-Item Env:NAME` |
 | `unset NAME` | `Remove-Item Env:NAME` |
 | Line continuation `\` | Backtick `` ` `` at the end of the line, or one long line |
@@ -62,6 +64,15 @@ docker compose up --build --detach --wait --wait-timeout 180 ui
 docker compose exec -T api python -m app.knowledge.ingest
 docker compose ps --all
 ```
+
+Issue the first administrator token (every `/api/*` request needs one; the database stores only its hash, so keep the value in a password manager):
+
+```powershell
+$env:API_TOKEN = docker compose exec -T api python -m app.tokens issue `
+  --email admin@example.com --name 'Administrator' --role admin
+```
+
+Paste the same token into the sidebar of the [operator interface](http://127.0.0.1:8502). The smoke test and the demo scenario read it from `$env:API_TOKEN`.
 
 Check this computer without Docker or a database, and run the unit tests:
 
@@ -94,12 +105,16 @@ docker compose logs --no-color api | Select-String 'REQUEST_ID_FROM_UI'
 
 ## JSON requests to the API
 
-The helper converts a hashtable to UTF-8 JSON, so Russian text arrives intact:
+The helper converts a hashtable to UTF-8 JSON, so Russian text arrives intact, and sends the staff token from `$env:API_TOKEN`:
 
 ```powershell
 function Invoke-Api {
   param([string]$Method, [string]$Path, [hashtable]$Body)
-  $request = @{ Method = $Method; Uri = "http://127.0.0.1:8001$Path" }
+  $request = @{
+    Method = $Method
+    Uri = "http://127.0.0.1:8001$Path"
+    Headers = @{ Authorization = "Bearer $env:API_TOKEN" }
+  }
   if ($Body) {
     $json = $Body | ConvertTo-Json -Depth 10
     $request.ContentType = 'application/json; charset=utf-8'
@@ -116,7 +131,7 @@ Invoke-Api POST /api/knowledge/search @{
 }
 ```
 
-`Invoke-RestMethod` throws on HTTP 4xx and 5xx; the message shows the status code. To see an expected error such as 409 without an exception, use `curl.exe --silent --show-error --write-out '%{http_code}' ...`.
+`Invoke-RestMethod` throws on HTTP 4xx and 5xx; the message shows the status code. A 401 means the token is missing, expired, or revoked; a 403 means the role is too low; a 429 means the per-minute limit of changes was reached. To see an expected error such as 409 without an exception, use `curl.exe --silent --show-error --write-out '%{http_code}' ...`.
 
 ## What is checked on Windows
 

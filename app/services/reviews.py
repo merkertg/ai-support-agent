@@ -13,11 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentRun, AgentSuggestion, Ticket, TicketMessage, User
-from app.schemas.resources import CLOSED_TICKET_STATUSES
+from app.schemas.resources import CLOSED_TICKET_STATUSES, ROLE_LEVELS
 from app.schemas.reviews import SuggestionDetailRead, SuggestionStatus
-from app.services.errors import ResourceConflict, ResourceNotFound
+from app.services.errors import ResourceConflict, ResourceForbidden, ResourceNotFound
 
 SUGGESTION_NOT_FOUND = "Предложение агента не найдено"
+REVIEWER_REQUIRED = "Решение по предложению принимает роль reviewer или admin"
 ALREADY_REVIEWED = "Предложение уже рассмотрено"
 TICKET_CLOSED = (
     "Обращение закрыто: одобрение и доставка недоступны. "
@@ -83,6 +84,11 @@ def get_suggestion(session: Session, suggestion_id: int) -> SuggestionDetailRead
     return result
 
 
+def can_review(user: User) -> bool:
+    """Решать по предложениям могут роли reviewer и admin."""
+    return ROLE_LEVELS.get(user.role, 0) >= ROLE_LEVELS["reviewer"]
+
+
 def check_reviewable(
     session: Session, suggestion_id: int, reviewer_id: int, decision: str
 ) -> AgentRun:
@@ -90,6 +96,8 @@ def check_reviewable(
 
     Проверка выполняется раньше resume: иначе неверный id сотрудника или
     закрытое обращение «израсходовали» бы ожидание графа до отказа в узле.
+    Роль перечитывается после HTTP-проверки; окончательная проверка и
+    блокировка сотрудника выполняются в транзакции apply_review.
     """
     suggestion = session.get(AgentSuggestion, suggestion_id)
     if suggestion is None:
@@ -101,6 +109,8 @@ def check_reviewable(
         raise ResourceNotFound("Сотрудник не найден")
     if not reviewer.is_active:
         raise ResourceConflict("Сотрудник неактивен и не может рассматривать")
+    if not can_review(reviewer):
+        raise ResourceForbidden(REVIEWER_REQUIRED)
     run = session.get(AgentRun, suggestion.agent_run_id)
     if run is None:
         raise ResourceNotFound(SUGGESTION_NOT_FOUND)
@@ -116,6 +126,7 @@ def apply_review(session: Session, suggestion_id: int, review: dict) -> dict:
 
     SELECT … FOR UPDATE блокирует предложение и обращение до commit: второе
     параллельное решение дождётся первого и получит 409, а не двойную доставку.
+    FOR SHARE сотрудника сериализует доставку с изменением его роли/активности.
     Возвращает только JSON-совместимые значения для состояния графа.
     """
     with session.begin():
@@ -128,9 +139,20 @@ def apply_review(session: Session, suggestion_id: int, review: dict) -> dict:
             raise ResourceNotFound(SUGGESTION_NOT_FOUND)
         if suggestion.status != "pending":
             raise ResourceConflict(ALREADY_REVIEWED)
-        reviewer = session.get(User, review["reviewer_id"])
+        # Порядок блокировок: предложение → сотрудник → обращение. SHARE
+        # разрешает одному рецензенту решать по разным обращениям параллельно,
+        # но удерживает роль и активность до commit. populate_existing обновит
+        # User, если сессия уже читала его до конкурентного понижения роли.
+        reviewer = session.scalar(
+            select(User)
+            .where(User.id == review["reviewer_id"])
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
         if reviewer is None or not reviewer.is_active:
             raise ResourceNotFound("Сотрудник не найден")
+        if not can_review(reviewer):
+            raise ResourceForbidden(REVIEWER_REQUIRED)
         run = session.get(AgentRun, suggestion.agent_run_id)
         ticket = session.scalar(
             select(Ticket).where(Ticket.id == run.ticket_id).with_for_update()

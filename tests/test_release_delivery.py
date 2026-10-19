@@ -281,9 +281,11 @@ class FakeRegistry:
         return None if response is None else delivery.manifest_identity(*response)
 
     def command(self, *arguments):
-        """Имитировать tag, push и imagetools create; остальное — ошибка."""
+        """Имитировать tag, push, imagetools create и cosign; остальное — ошибка."""
         self.events.append(arguments)
-        if arguments[:2] == ("docker", "tag"):
+        if arguments[0] == "cosign":
+            self.sign(*arguments[1:])
+        elif arguments[:2] == ("docker", "tag"):
             self.tags[arguments[3]] = arguments[2]
         elif arguments[:2] == ("docker", "push"):
             remote, tag = arguments[2].removeprefix("ghcr.io/").rsplit(":", 1)
@@ -326,6 +328,54 @@ class FakeRegistry:
                 },
             )
         return ""
+
+    def sign(self, operation, *arguments):
+        """Записать подпись как cosign v3 в registry без Referrers API.
+
+        Подпись — отдельный OCI-артефакт с полем subject, а тег
+        `sha256-<hex>` указывает на index всех артефактов этого образа.
+        Сам подписываемый index и теги образов не меняются.
+        """
+        if operation not in ("sign", "attest"):
+            return
+        remote, digest = arguments[-1].removeprefix("ghcr.io/").split("@")
+        artifact = {
+            "schemaVersion": 2,
+            "mediaType": delivery.MANIFEST_TYPES[1],
+            "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "config": {
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "digest": "sha256:" + "4" * 64,
+                "size": 2,
+            },
+            "layers": [],
+            "subject": {"mediaType": "x", "digest": digest, "size": 1},
+            "annotations": {"operation": operation, "n": str(len(self.events))},
+        }
+        body, artifact_digest = encode(artifact)
+        self.store[remote, artifact_digest] = body
+        fallback = f"sha256-{digest.removeprefix('sha256:')}"
+        index = json.loads(
+            self.store.get(
+                (remote, fallback),
+                json.dumps({"schemaVersion": 2, "mediaType": delivery.INDEX_TYPES[1]}),
+            )
+        )
+        index.setdefault("manifests", []).append(
+            {
+                "mediaType": delivery.MANIFEST_TYPES[1],
+                "digest": artifact_digest,
+                "size": len(body),
+                "artifactType": artifact["artifactType"],
+            }
+        )
+        self.put(remote, fallback, index)
+
+    def cosign(self, operation):
+        """Аргументы вызовов cosign выбранной операции."""
+        return [
+            event[2:] for event in self.events if event[:2] == ("cosign", operation)
+        ]
 
     def pushes(self):
         """Список ссылок, отправленных docker push или imagetools."""
@@ -793,3 +843,461 @@ def test_index_digest_mismatch_is_rejected_before_identity():
     response = http_response(data, digest=OTHER_ID)
     with pytest.raises(delivery.DeliveryError, match="Digest manifest"):
         delivery.manifest_identity(data, response.read(), response.headers)
+
+
+IDENTITY = (
+    "https://github.com/merkertg/ai-support-agent/.github/workflows/ci.yml"
+    "@refs/heads/main"
+)
+
+
+def write_sboms(directory, images, *, override=None):
+    """Записать SBOM, как Trivy в CI: CycloneDX с ImageID каждого образа."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for image, image_id in images.items():
+        data = {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.7",
+            "metadata": {
+                "component": {
+                    "type": "container",
+                    "name": image,
+                    "properties": [
+                        {"name": "aquasecurity:trivy:DiffID", "value": OTHER_ID},
+                        {"name": delivery.SBOM_IMAGE_ID, "value": image_id},
+                    ],
+                }
+            },
+            "components": [],
+        }
+        if override and image in override:
+            data = override[image]
+        delivery.sbom_path(directory, image).write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+    return directory
+
+
+@pytest.mark.parametrize("mode", ["config", "manifest", "index"])
+def test_sign_uses_index_digests_from_report_and_attests_platform_manifests(
+    monkeypatch, tmp_path, mode
+):
+    """Подписывается digest index из отчёта; SBOM — manifest архитектуры из index."""
+    fake = FakeRegistry(mode)
+    monkeypatch.setattr(delivery, "command", fake.command)
+    report = delivery.publish_images(
+        fake.tested, API_REPOSITORY, COMMIT, fake, main_sha=COMMIT
+    )
+    report = json.loads(json.dumps(report))
+    sboms = write_sboms(tmp_path / "sbom", fake.tested)
+    published = {remote: fake.fetch(remote, f"sha-{COMMIT}")[1] for remote in REMOTES}
+    lines = delivery.sign_images(report, API_REPOSITORY, COMMIT, IDENTITY, sboms)
+
+    signed = [arguments[-1] for arguments in fake.cosign("sign")]
+    assert signed == [item["digest"] for item in report]
+    assert all(
+        "@sha256:" in reference and ":sha-" not in reference for reference in signed
+    )
+    attested = {arguments[-1]: arguments for arguments in fake.cosign("attest")}
+    for item, remote in zip(report, REMOTES, strict=True):
+        children = platform_children(fake, remote, f"sha-{COMMIT}")
+        for arch in delivery.PLATFORMS:
+            reference = f"ghcr.io/{remote}@{children[arch]}"
+            assert item["manifests"][arch] == reference
+            image = delivery.COMPONENTS[item["component"]][arch]
+            assert attested[reference][:5] == (
+                "--yes",
+                "--type",
+                "cyclonedx",
+                "--predicate",
+                str(delivery.sbom_path(sboms, image)),
+            )
+        # Подписи OCI 1.1 лежат рядом и не меняют сам опубликованный index.
+        assert fake.fetch(remote, f"sha-{COMMIT}")[1] == published[remote]
+        assert delivery.verified_index(fake, remote, f"sha-{COMMIT}", children)
+    verified = fake.cosign("verify") + fake.cosign("verify-attestation")
+    assert len(verified) == 6
+    policy = (
+        "--certificate-identity",
+        IDENTITY,
+        "--certificate-oidc-issuer",
+        delivery.OIDC_ISSUER,
+        "--certificate-github-workflow-sha",
+        COMMIT,
+    )
+    assert all(arguments[-7:-1] == policy for arguments in verified)
+    assert {arguments[-1] for arguments in verified} == set(signed) | set(attested)
+    first_verify = next(
+        index
+        for index, event in enumerate(fake.events)
+        if event[:2] == ("cosign", "verify")
+    )
+    assert all(
+        event[1] not in ("sign", "attest") for event in fake.events[first_verify:]
+    )
+    assert f"- Identity: `{IDENTITY}`" in lines
+
+
+def test_verify_policy_pins_identity_issuer_and_commit(monkeypatch, tmp_path, registry):
+    """cosign verify получает identity workflow, OIDC GitHub и SHA commit."""
+    report = publish(registry, version="v1.2.3")
+    sboms = write_sboms(tmp_path / "sbom", registry.tested)
+    delivery.sign_images(report, API_REPOSITORY, COMMIT, IDENTITY, sboms)
+    policy = (
+        "--certificate-identity",
+        IDENTITY,
+        "--certificate-oidc-issuer",
+        "https://token.actions.githubusercontent.com",
+        "--certificate-github-workflow-sha",
+        COMMIT,
+    )
+    for arguments in registry.cosign("verify"):
+        assert arguments == (*policy, arguments[-1])
+    for arguments in registry.cosign("verify-attestation"):
+        assert arguments == ("--type", "cyclonedx", *policy, arguments[-1])
+
+
+def test_republished_release_after_signing_is_still_identical(registry, tmp_path):
+    """Подписи и SBOM-attestation не мешают идемпотентному повтору релиза."""
+    report = publish(registry, version="v1.2.3")
+    sboms = write_sboms(tmp_path / "sbom", registry.tested)
+    delivery.sign_images(report, API_REPOSITORY, COMMIT, IDENTITY, sboms)
+    fallback_tags = [key for key in registry.store if key[1].startswith("sha256-")]
+    assert len(fallback_tags) == 6
+    registry.events.clear()
+    assert publish(registry, version="v1.2.3") == report
+    assert registry.pushes() == []
+
+
+def test_latest_with_other_digest_is_signed_too(registry, tmp_path):
+    """Если latest — другой index, подписываются оба digest, без тегов."""
+    report = publish(registry, main_sha=COMMIT)
+    for item in report:
+        assert item["latest_digest"] == item["digest"]
+    report[0]["latest_digest"] = f"ghcr.io/{API_REPOSITORY}@{OTHER_ID}"
+    sboms = write_sboms(tmp_path / "sbom", registry.tested)
+    delivery.sign_images(report, API_REPOSITORY, COMMIT, IDENTITY, sboms)
+    signed = [arguments[-1] for arguments in registry.cosign("sign")]
+    assert signed == [
+        report[0]["digest"],
+        f"ghcr.io/{API_REPOSITORY}@{OTHER_ID}",
+        report[1]["digest"],
+    ]
+
+
+def valid_report():
+    """Отчёт publish для обоих пакетов с digest index и manifest архитектур."""
+    return [
+        {
+            "component": component,
+            "image": f"ghcr.io/{remote}:sha-{COMMIT}",
+            "digest": f"ghcr.io/{remote}@{OTHER_ID}",
+            "manifests": {
+                arch: f"ghcr.io/{remote}@{IMAGES[delivery.COMPONENTS[component][arch]]}"
+                for arch in delivery.PLATFORMS
+            },
+            "tested": {
+                arch: IMAGES[delivery.COMPONENTS[component][arch]]
+                for arch in delivery.PLATFORMS
+            },
+            "latest": "skip",
+        }
+        for component, remote in zip(("api", "ui"), REMOTES, strict=True)
+    ]
+
+
+def broken(change):
+    """Сделать копию корректного отчёта и испортить её."""
+    report = valid_report()
+    change(report)
+    return report
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        None,
+        {},
+        [],
+        valid_report()[:1],
+        valid_report() + valid_report()[:1],
+        [valid_report()[0], valid_report()[0]],
+        broken(lambda r: r[0].update(digest=f"ghcr.io/{API_REPOSITORY}:sha-{COMMIT}")),
+        broken(lambda r: r[0].update(digest=f"ghcr.io/evil/name@{OTHER_ID}")),
+        broken(lambda r: r[1].update(digest=f"ghcr.io/{API_REPOSITORY}@{OTHER_ID}")),
+        broken(lambda r: r[0].update(digest=f"docker.io/{API_REPOSITORY}@{OTHER_ID}")),
+        broken(lambda r: r[0].update(digest=f"ghcr.io/{API_REPOSITORY}@{OTHER_ID};id")),
+        broken(lambda r: r[0].update(latest_digest=f"ghcr.io/{API_REPOSITORY}:latest")),
+        broken(lambda r: r[0].pop("manifests")),
+        broken(lambda r: r[0]["manifests"].pop("arm64")),
+        broken(lambda r: r[0]["manifests"].update(arm64="ghcr.io/x@" + OTHER_ID)),
+        broken(lambda r: r[1]["tested"].update(amd64="short")),
+        broken(lambda r: r[1].update(component="worker")),
+    ],
+)
+def test_malformed_report_never_reaches_cosign(monkeypatch, tmp_path, report):
+    """Тег вместо digest, чужой пакет или неполный отчёт не подписываются."""
+    runner = Mock(side_effect=AssertionError("cosign нельзя запускать"))
+    monkeypatch.setattr(delivery, "command", runner)
+    sboms = write_sboms(tmp_path / "sbom", IMAGES)
+    with pytest.raises(delivery.DeliveryError):
+        delivery.sign_images(report, API_REPOSITORY, COMMIT, IDENTITY, sboms)
+    runner.assert_not_called()
+
+
+def test_valid_report_targets_both_packages():
+    """Корректный отчёт даёт digest index и manifest обеих архитектур."""
+    targets = delivery.signing_targets(valid_report(), "Merkertg/AI-Support-Agent")
+    assert [item["component"] for item in targets] == ["api", "ui"]
+    assert targets[0]["indexes"] == [f"ghcr.io/{API_REPOSITORY}@{OTHER_ID}"]
+    assert set(targets[1]["manifests"]) == {"amd64", "arm64"}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "missing",
+        "not json",
+        [],
+        {"bomFormat": "SPDX"},
+        {"bomFormat": "CycloneDX"},
+        {"bomFormat": "CycloneDX", "metadata": []},
+        {"bomFormat": "CycloneDX", "metadata": {"component": {"properties": {}}}},
+        {
+            "bomFormat": "CycloneDX",
+            "metadata": {
+                "component": {
+                    "properties": [{"name": delivery.SBOM_IMAGE_ID, "value": OTHER_ID}]
+                }
+            },
+        },
+        {
+            "bomFormat": "CycloneDX",
+            "metadata": {
+                "component": {
+                    "properties": [
+                        {"name": delivery.SBOM_IMAGE_ID, "value": UI_ARM_ID},
+                        {"name": delivery.SBOM_IMAGE_ID, "value": OTHER_ID},
+                    ]
+                }
+            },
+        },
+    ],
+)
+def test_sbom_of_another_image_is_rejected(tmp_path, override):
+    """Нет файла, не CycloneDX или чужой ImageID — SBOM не прикладывается."""
+    image = delivery.LOCAL_IMAGES[3]
+    directory = write_sboms(tmp_path, IMAGES)
+    path = delivery.sbom_path(directory, image)
+    if override == "missing":
+        path.unlink()
+    elif override == "not json":
+        path.write_text("{", encoding="utf-8")
+    else:
+        path.write_text(json.dumps(override), encoding="utf-8")
+    with pytest.raises(delivery.DeliveryError, match="SBOM"):
+        delivery.verify_sboms(directory, IMAGES)
+
+
+def test_matching_sboms_are_found_for_all_four_images(tmp_path):
+    """Имя файла повторяет шаг CI: `ai-support-agent-ui-ci-arm64.cdx.json`."""
+    found = delivery.verify_sboms(write_sboms(tmp_path, IMAGES), IMAGES)
+    assert set(found) == set(delivery.LOCAL_IMAGES)
+    assert found["ai-support-agent-ui:ci-arm64"].name == (
+        "ai-support-agent-ui-ci-arm64.cdx.json"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ref", "workflow_ref"),
+    [
+        (
+            "refs/heads/main",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/heads/main",
+        ),
+        (
+            "refs/tags/v1.2.3",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/tags/v1.2.3",
+        ),
+    ],
+)
+def test_signing_identity_is_ci_workflow_of_delivery_ref(ref, workflow_ref):
+    """Identity сертификата — ci.yml этого репозитория на main или vX.Y.Z."""
+    identity = delivery.signing_identity(
+        "https://github.com", workflow_ref, API_REPOSITORY, ref
+    )
+    assert identity == f"https://github.com/{workflow_ref}"
+
+
+@pytest.mark.parametrize(
+    ("server", "workflow_ref", "repository", "ref"),
+    [
+        (
+            "https://github.com",
+            "merkertg/ai-support-agent/.github/workflows/other.yml@refs/heads/main",
+            API_REPOSITORY,
+            "refs/heads/main",
+        ),
+        (
+            "https://github.com",
+            "fork/ai-support-agent/.github/workflows/ci.yml@refs/heads/main",
+            API_REPOSITORY,
+            "refs/heads/main",
+        ),
+        (
+            "https://github.com",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/pull/3/merge",
+            API_REPOSITORY,
+            "refs/pull/3/merge",
+        ),
+        (
+            "https://github.com",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/heads/feature",
+            API_REPOSITORY,
+            "refs/heads/feature",
+        ),
+        (
+            "https://github.com",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/tags/v1.2",
+            API_REPOSITORY,
+            "refs/tags/v1.2",
+        ),
+        (
+            "https://github.com",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/heads/main",
+            API_REPOSITORY,
+            "refs/tags/v1.2.3",
+        ),
+        (
+            "http://github.com",
+            "merkertg/ai-support-agent/.github/workflows/ci.yml@refs/heads/main",
+            API_REPOSITORY,
+            "refs/heads/main",
+        ),
+        ("https://github.com", "", API_REPOSITORY, "refs/heads/main"),
+        (
+            "https://github.com",
+            "a/b;id/.github/workflows/ci.yml@refs/heads/main",
+            "a/b;id",
+            "refs/heads/main",
+        ),
+    ],
+)
+def test_signing_identity_rejects_other_workflows_and_refs(
+    server, workflow_ref, repository, ref
+):
+    """Другой workflow, fork, PR, ветка или неверная версия не подписывают образ."""
+    with pytest.raises(delivery.DeliveryError, match="Подписывать"):
+        delivery.signing_identity(server, workflow_ref, repository, ref)
+
+
+def test_index_platforms_skips_buildkit_and_cosign_attestations():
+    """Attestation BuildKit и OCI-артефакты без платформы не считаются образами."""
+    data = {
+        "schemaVersion": 2,
+        "mediaType": delivery.INDEX_TYPES[1],
+        "manifests": [
+            {
+                "mediaType": delivery.MANIFEST_TYPES[1],
+                "digest": API_ID,
+                "size": 1,
+                "platform": {"os": "linux", "architecture": "amd64"},
+            },
+            {
+                "mediaType": delivery.MANIFEST_TYPES[1],
+                "digest": API_ARM_ID,
+                "size": 1,
+                "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"},
+            },
+        ]
+        + [
+            {
+                "mediaType": delivery.MANIFEST_TYPES[1],
+                "digest": OTHER_ID,
+                "size": 1,
+                "platform": {"os": "unknown", "architecture": "unknown"},
+                "annotations": {
+                    "vnd.docker.reference.digest": subject,
+                    "vnd.docker.reference.type": "attestation-manifest",
+                },
+            }
+            for subject in (API_ID, API_ARM_ID)
+        ]
+        + [
+            {
+                "mediaType": delivery.MANIFEST_TYPES[1],
+                "digest": UI_ID,
+                "size": 1,
+                "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            }
+        ],
+    }
+    assert delivery.index_platforms(data) == {"amd64": API_ID, "arm64": API_ARM_ID}
+
+
+def test_publish_writes_report_and_sign_reads_it(monkeypatch, tmp_path, registry):
+    """CLI: publish проверяет SBOM до записи и сохраняет отчёт, sign подписывает его."""
+    (tmp_path / "image-artifact").mkdir()
+    monkeypatch.chdir(tmp_path)
+    write_sboms(tmp_path / "sbom", registry.tested)
+    environment = {
+        "GITHUB_SHA": COMMIT,
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REPOSITORY": "merkertg/ai-support-agent",
+        "GITHUB_ACTOR": "actor",
+        "GITHUB_TOKEN": "TOKEN",
+        "MAIN_SHA": COMMIT,
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_WORKFLOW_REF": IDENTITY.removeprefix("https://github.com/"),
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        delivery, "verify_images", lambda directory, commit: registry.tested
+    )
+    monkeypatch.setattr(delivery, "Registry", lambda actor, token: registry)
+    monkeypatch.setattr(delivery.sys, "argv", ["release_delivery.py", "publish"])
+    assert delivery.main() == 0
+    report = json.loads((tmp_path / "published-images.json").read_text("utf-8"))
+    assert [item["component"] for item in report] == ["api", "ui"]
+    monkeypatch.setattr(delivery.sys, "argv", ["release_delivery.py", "sign"])
+    assert delivery.main() == 0
+    assert [arguments[-1] for arguments in registry.cosign("sign")] == [
+        item["digest"] for item in report
+    ]
+
+
+def test_publish_without_matching_sbom_stops_before_registry(
+    monkeypatch, tmp_path, capsys
+):
+    """Без SBOM проверенных образов publish не создаёт клиент GHCR и не пишет."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_SHA", COMMIT)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setattr(delivery, "verify_images", lambda directory, commit: IMAGES)
+    monkeypatch.setattr(
+        delivery, "Registry", Mock(side_effect=AssertionError("Нельзя писать"))
+    )
+    monkeypatch.setattr(delivery.sys, "argv", ["release_delivery.py", "publish"])
+    assert delivery.main() == 1
+    assert "SBOM" in capsys.readouterr().err
+
+
+def test_sign_from_pull_request_workflow_is_refused(monkeypatch, tmp_path, capsys):
+    """Ручной запуск или PR не подписывает: identity обязана быть main/vX.Y.Z."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_SHA", COMMIT)
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/3/merge")
+    monkeypatch.setenv("GITHUB_REPOSITORY", API_REPOSITORY)
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv(
+        "GITHUB_WORKFLOW_REF",
+        f"{API_REPOSITORY}/.github/workflows/ci.yml@refs/pull/3/merge",
+    )
+    runner = Mock()
+    monkeypatch.setattr(delivery, "command", runner)
+    monkeypatch.setattr(delivery.sys, "argv", ["release_delivery.py", "sign"])
+    assert delivery.main() == 1
+    assert "Подписывать" in capsys.readouterr().err
+    runner.assert_not_called()

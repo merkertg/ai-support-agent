@@ -13,6 +13,8 @@ from operator_ui.client import APIError
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "operator_ui" / "main.py"
 STAMP = "2026-10-18T12:00:00Z"
+# Вымышленный токен правильного формата: FakeAPI его не проверяет.
+TOKEN = "asa_" + "T" * 43
 
 
 class FakeAPI:
@@ -22,6 +24,7 @@ class FakeAPI:
         """Создать обращение и pending-предложение без подключения к API или модели."""
         self.posts = []
         self.reads = []
+        self.role = "admin"
         self.provider = "mock"
         self.embedding_provider = "mock"
         self.run_error = None
@@ -85,6 +88,11 @@ class FakeAPI:
 
     def __exit__(self, *args):
         """Не закрывать тестовые данные между обычными rerun страницы."""
+
+    def me(self):
+        """Вернуть сотрудника токена; роль меняется тестом."""
+        self.reads.append(("me",))
+        return {"id": 7, "name": "Учебный сотрудник", "role": self.role}
 
     def status(self, area):
         """Вернуть только безопасную конфигурацию провайдера, без API-ключей."""
@@ -213,13 +221,27 @@ class FakeAPI:
         }
 
 
+def sign_in(screen, token=TOKEN):
+    """Ввести токен сотрудника в боковой панели, как это делает человек."""
+    screen.sidebar.text_input(key="api_token").input(token).run()
+    assert not screen.exception
+    return screen
+
+
 @pytest.fixture
 def desktop(monkeypatch):
     """Запустить реальный Streamlit script runner с детерминированным API-клиентом."""
     api = FakeAPI()
-    monkeypatch.setattr(app, "make_client", lambda: api)
-    screen = AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run()
-    assert not screen.exception
+    tokens = []
+
+    def client(token):
+        """Запомнить токен, с которым страница создаёт HTTP-клиент."""
+        tokens.append(token)
+        return api
+
+    monkeypatch.setattr(app, "make_client", client)
+    screen = sign_in(AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run())
+    assert set(tokens) == {TOKEN}
     return screen, api
 
 
@@ -366,7 +388,6 @@ def test_review_requires_confirmation_and_correct_payload(desktop, decision):
             1,
             {
                 "decision": "approve" if decision == "Одобрить" else "reject",
-                "reviewer_id": 1,
                 "final_content": "Проверенный ответ"
                 if decision == "Одобрить"
                 else None,
@@ -473,7 +494,7 @@ def test_analysis_checks_embedding_cost_even_with_mock_model(desktop):
         ("Лицензии", {"Ключ новой лицензии": "TEST-KEY"}, "licenses"),
         (
             "Сотрудники",
-            {"Название / имя": "Сотрудник", "Email": "operator@example.org"},
+            {"Название / имя": "Сотрудник", "Email": "reviewer@example.org"},
             "users",
         ),
     ],
@@ -495,6 +516,8 @@ def test_catalog_forms_create_once(desktop, catalog, fields, resource):
             "product_id": 1,
             "license_key": "TEST-KEY",
         }
+    if resource == "users":
+        assert api.posts[0][2]["role"] == "operator"
     screen.run()
     assert len(api.posts) == 1
 
@@ -512,13 +535,12 @@ def test_empty_ticket_form_does_not_create_record(desktop):
 def test_server_failure_remains_an_operator_message(monkeypatch):
     """Недоступность сервера не раскрывает traceback и не ломает Streamlit script."""
 
-    def unavailable_client():
+    def unavailable_client(token):
         """Сымитировать ожидаемую ошибку конфигурации до открытия соединения."""
         raise APIError("API временно недоступен.")
 
     monkeypatch.setattr(app, "make_client", unavailable_client)
-    screen = AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run()
-    assert not screen.exception
+    screen = sign_in(AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run())
     assert screen.error[0].value == "API временно недоступен."
 
 
@@ -536,13 +558,12 @@ def test_closed_ticket_disables_analysis(desktop, status):
 def test_server_error_shows_request_code_for_administrator(monkeypatch):
     """Код запроса из ответа API помогает найти строку в журнале сервера."""
 
-    def failing_client():
+    def failing_client(token):
         """Сымитировать ответ 503 с id запроса."""
         raise APIError("Сервис временно недоступен.", 503, None, "req-0123456789")
 
     monkeypatch.setattr(app, "make_client", failing_client)
-    screen = AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run()
-    assert not screen.exception
+    screen = sign_in(AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run())
     assert any("req-0123456789" in item.value for item in screen.caption)
 
 
@@ -574,3 +595,82 @@ def test_entrypoint_imports_package_outside_project_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     # Сравниваем части пути: в Windows разделитель — обратная косая черта.
     assert Path(result.stdout.strip()).parts[-2:] == ("operator_ui", "app.py")
+
+
+def test_without_token_page_asks_for_it_and_sends_nothing(monkeypatch):
+    """Пустое поле токена: страница объясняет вход и не создаёт HTTP-клиент."""
+    created = []
+    monkeypatch.setattr(app, "make_client", lambda token: created.append(token))
+    screen = AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run()
+    assert not screen.exception
+    assert created == []
+    assert any("токен сотрудника" in item.value for item in screen.info)
+    sign_in(screen, "   ")
+    assert created == []
+
+
+def test_rejected_token_shows_message_without_pages(monkeypatch):
+    """Ответ 401 на /api/auth/me показывает подсказку и не открывает разделы."""
+
+    class RejectedAPI(FakeAPI):
+        """Сымитировать отозванный токен."""
+
+        def me(self):
+            """Отказать так же, как APIClient при HTTP 401."""
+            raise APIError("Токен не принят.", 401)
+
+    api = RejectedAPI()
+    monkeypatch.setattr(app, "make_client", lambda token: api)
+    screen = sign_in(AppTest.from_file(str(ENTRYPOINT), default_timeout=15).run())
+    assert [item.value for item in screen.error] == ["Токен не принят."]
+    assert not screen.sidebar.radio
+    assert api.reads == [] and api.posts == []
+
+
+def test_signed_in_staff_name_and_role_are_shown(desktop):
+    """Боковая панель показывает, от чьего имени выполняются действия."""
+    screen, api = desktop
+    captions = [item.value for item in screen.sidebar.caption]
+    assert "Вы: Учебный сотрудник · Администратор" in captions
+    assert ("me",) in api.reads
+
+
+def test_operator_role_cannot_open_review_form(desktop):
+    """Оператор видит предложение, но форма решения для его роли скрыта."""
+    screen, api = desktop
+    api.role = "operator"
+    open_suggestion(screen)
+    assert not [
+        button for button in screen.button if button.label == "Сохранить решение"
+    ]
+    assert any("рецензент или администратор" in item.value for item in screen.info)
+    assert api.posts == []
+
+
+def test_operator_role_cannot_create_staff(desktop):
+    """Создавать сотрудников и назначать роли может только администратор."""
+    screen, api = desktop
+    api.role = "operator"
+    navigate(screen, "Справочники")
+    find(screen.selectbox, "Справочник").set_value("Сотрудники").run()
+    assert not [button for button in screen.button if button.label == "Создать запись"]
+    assert any("администратор" in item.value for item in screen.info)
+
+
+def test_admin_chooses_role_of_new_staff(desktop):
+    """Администратор выбирает роль нового сотрудника в форме."""
+    screen, api = desktop
+    navigate(screen, "Справочники")
+    find(screen.selectbox, "Справочник").set_value("Сотрудники").run()
+    find(screen.text_input, "Название / имя").set_value("Анна")
+    find(screen.text_input, "Email").set_value("anna@example.org")
+    find(screen.selectbox, "Роль").set_value("Рецензент")
+    find(screen.button, "Создать запись").click().run()
+    assert not screen.exception
+    assert api.posts == [
+        (
+            "create",
+            "users",
+            {"name": "Анна", "email": "anna@example.org", "role": "reviewer"},
+        )
+    ]

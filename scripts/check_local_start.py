@@ -2,9 +2,10 @@
 
 Скрипт поднимает Uvicorn и Streamlit отдельными процессами на свободных портах
 127.0.0.1, проверяет /health, ответ /ready без базы данных, заголовок
-X-Request-ID, сервер Streamlit и отрисовку страницы оператора против
-запущенного API. Затем оба процесса останавливаются. База данных, Qdrant,
-ключи и сеть не нужны: так проверяется переносимость на Linux, macOS и Windows.
+X-Request-ID, отказ 401 для /api/* без токена, сервер Streamlit и отрисовку
+страницы оператора против запущенного API. Затем оба процесса останавливаются.
+База данных, Qdrant, ключи и сеть не нужны: так проверяется переносимость
+на Linux, macOS и Windows.
 """
 
 import argparse
@@ -22,6 +23,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Токен правильного формата, которого нет ни в одной БД: страница с ним
+# обращается к API, а API без базы данных отвечает понятной ошибкой 503.
+SAMPLE_TOKEN = "asa_" + "0" * 43
 
 
 def use_utf8_output() -> None:
@@ -127,9 +131,20 @@ def check_api(base: str) -> list[str]:
     status, _, body = fetch(f"{base}/ready", timeout=5)
     if status != 503 or "detail" not in json.loads(body):
         raise StartError(f"/ready без базы должен вернуть JSON 503, получен {status}")
+    # Отказ без токена не требует базы данных: заголовок проверяется раньше SQL.
+    status, headers, body = fetch(f"{base}/api/customers", timeout=5)
+    if (
+        status != 401
+        or headers.get("WWW-Authenticate") != "Bearer"
+        or "detail" not in json.loads(body)
+    ):
+        raise StartError(
+            f"/api/customers без токена должен вернуть 401, получен {status}"
+        )
     return [
         "OK API: /health 200, X-Request-ID есть",
         "OK API: /ready без БД — 503 JSON",
+        "OK API: /api/* без токена — 401 Bearer",
     ]
 
 
@@ -144,7 +159,8 @@ def check_ui_server(base: str) -> str:
 def check_ui_page(api_url: str) -> str:
     """Отрисовать настоящую страницу оператора против запущенного API.
 
-    Без БД API отвечает 503: страница обязана показать понятную ошибку,
+    Без токена страница просит его ввести и не обращается к API. С токеном
+    без БД API отвечает 503: страница обязана показать понятную ошибку,
     а не упасть с исключением Python.
     """
     from streamlit.testing.v1 import AppTest
@@ -153,6 +169,11 @@ def check_ui_page(api_url: str) -> str:
     screen = AppTest.from_file(
         str(PROJECT_ROOT / "operator_ui" / "main.py"), default_timeout=30
     ).run()
+    if screen.exception:
+        raise StartError("страница оператора завершилась исключением")
+    if screen.error or not screen.info:
+        raise StartError("страница без токена не попросила ввести токен сотрудника")
+    screen.sidebar.text_input(key="api_token").input(SAMPLE_TOKEN).run()
     if screen.exception:
         raise StartError("страница оператора завершилась исключением")
     if not screen.error:

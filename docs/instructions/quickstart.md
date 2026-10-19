@@ -2,7 +2,7 @@
 
 [← README](../../README.md) · [All documentation](../../README.md#documentation)
 
-Install the tools, start the Compose stack with the operator interface, index the knowledge base, and optionally run the API or the UI on the host.
+Install the tools, start the Compose stack with the operator interface, index the knowledge base, issue the first staff token, and optionally run the API or the UI on the host.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ uv sync --locked
 uv run --locked python scripts/check_local_start.py
 ```
 
-The script starts Uvicorn and Streamlit as separate processes on free local ports from a temporary folder (so your `.env` is not read), checks `/health`, a JSON 503 from `/ready` without a database, the `X-Request-ID` header, the Streamlit server, and renders the operator page against the running API, then stops both processes. `Локальный запуск API и UI: OK` is printed on success.
+The script starts Uvicorn and Streamlit as separate processes on free local ports from a temporary folder (so your `.env` is not read), checks `/health`, a JSON 503 from `/ready` without a database, the `X-Request-ID` header, a 401 from `/api/*` without a token, the Streamlit server, and renders the operator page against the running API (first without a token, then with a sample token that the API without a database answers with 503), then stops both processes. `Локальный запуск API и UI: OK` is printed on success.
 
 On Windows in PowerShell, the stack starts with:
 
@@ -39,10 +39,12 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 uv sync --locked
 docker compose up --build --detach --wait --wait-timeout 180 ui
 docker compose exec -T api python -m app.knowledge.ingest
+$env:API_TOKEN = docker compose exec -T api python -m app.tokens issue `
+  --email admin@example.com --name 'Administrator' --role admin
 uv run --locked python scripts/check_local_start.py
 ```
 
-The repository stores text files with LF line endings (`.gitattributes`), so Windows checkouts do not get CRLF in shell examples, Markdown articles, or Python files. A working copy cloned before this rule may still contain CRLF; re-create it with `git rm --cached -r .` followed by `git reset --hard`. Command-line scripts write UTF-8 even when Windows redirects their output to a file or pipe.
+The repository stores text files with LF line endings (`.gitattributes`), so Windows checkouts do not get CRLF in shell examples, Markdown articles, or Python files. A working copy cloned before this rule may still contain CRLF. To apply the repository rules, make a fresh clone in a new folder and transfer any needed local edits before retiring the old checkout. Command-line scripts write UTF-8 even when Windows redirects their output to a file or pipe.
 
 ## Start the stack
 
@@ -65,11 +67,22 @@ Default addresses:
 - [API readiness](http://127.0.0.1:8001/ready): `{"status":"ok","database":"ok"}`.
 - [Application health](http://127.0.0.1:8001/health): `{"status":"ok","service":"ai-support-agent"}`.
 - [Interactive API documentation](http://127.0.0.1:8001/docs).
-- [Operator interface](http://127.0.0.1:8502) (`UI_PORT`); walkthrough in the [Stage 08 guide](../STAGE_08.md).
+- [Operator interface](http://127.0.0.1:8502) (`UI_PORT`); sign in with a staff token, walkthrough in the [Stage 08 guide](../STAGE_08.md).
 - PostgreSQL for host tools: `127.0.0.1:5433`.
 - Qdrant for host tools: `http://127.0.0.1:6335`.
 
-Check the running stack through real HTTP:
+## Issue the first staff token
+
+Every `/api/*` route requires a staff token; `/health`, `/ready`, and the documentation stay open. The first administrator is created from the API container, because no token exists yet:
+
+```bash
+export API_TOKEN="$(docker compose exec -T api python -m app.tokens issue \
+  --email admin@example.com --name 'Administrator' --role admin)"
+```
+
+The command prints only the token (to stdout) and a short note to stderr; the database stores only its SHA-256, so the token cannot be shown again. Keep it in a password manager, never in `.env` or Git. Tokens expire after 90 days by default (`--days` from 1 to 365). Paste the token into the operator UI sidebar to sign in. Roles, revocation, and the rate limit are described in [Using the API](usage.md#authentication-roles-and-rate-limit).
+
+Check the running stack through real HTTP (the smoke test reads the token from `API_TOKEN`):
 
 ```bash
 uv run --locked python scripts/smoke_test.py \
@@ -112,10 +125,11 @@ After pulling new code, rebuild and restart without `down`:
 ```bash
 docker compose up --build --detach --wait --wait-timeout 180 ui
 curl --silent --show-error --fail-with-body http://127.0.0.1:8001/ready
-curl --silent --show-error --fail-with-body http://127.0.0.1:8001/api/knowledge/status
+curl --silent --show-error --fail-with-body \
+  --header "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8001/api/knowledge/status
 ```
 
-Compose rebuilds the API and UI images, applies pending migrations through `migrate`, and recreates only the containers whose image or settings changed. The PostgreSQL and Qdrant volumes are reused, so records, waiting reviews, and the search index survive. Run `ingest` again only when articles changed; unchanged articles are skipped. Never add `--volumes` to `down` on a stack whose data you need.
+Compose rebuilds the API and UI images, applies pending migrations through `migrate`, and recreates only the containers whose image or settings changed. The PostgreSQL and Qdrant volumes are reused, so records, waiting reviews, tokens, and the search index survive. A stack created before staff tokens is upgraded by migration `0005_api_tokens`: existing employees keep their roles but have no tokens, so issue the first administrator token as shown above before using the API or the UI. Run `ingest` again only when articles changed; unchanged articles are skipped. Never add `--volumes` to `down` on a stack whose data you need.
 
 If the command stops with `dependency failed to start` or a missing `docker.sock`, Docker Desktop itself has stopped. Start it, wait until `docker version` shows the server, and run the same command again; the volumes are not affected.
 
@@ -142,7 +156,7 @@ API_URL=http://127.0.0.1:8001 uv run --locked --group ui streamlit run \
   operator_ui/main.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-Open [the host UI](http://127.0.0.1:8501). Inside Compose the UI uses `http://api:8000` instead.
+Open [the host UI](http://127.0.0.1:8501) and paste your staff token into the sidebar. Inside Compose the UI uses `http://api:8000` instead.
 
 ## Prepare a demonstration
 
@@ -150,6 +164,6 @@ Open [the host UI](http://127.0.0.1:8501). Inside Compose the UI uses `http://ap
 uv run --locked python scripts/demo_scenario.py --url http://127.0.0.1:8001
 ```
 
-The script checks that both providers are `mock` and the index is ready, then creates or reuses fictional records and leaves one suggestion `pending` for a human decision. See [the demo walkthrough](../DEMO.md).
+The script works as the employee of `API_TOKEN`. It checks that both providers are `mock` and the index is ready, then creates or reuses fictional records and leaves one suggestion `pending` for a human decision. See [the demo walkthrough](../DEMO.md).
 
-The Stage 01 standalone API still starts without a configured database: `/health`, `/docs`, and `/openapi.json` remain available. `/ready` returns HTTP 503 until PostgreSQL is reachable and its Alembic revision matches the application. `/health` checks the running application; `/ready` checks database readiness.
+The Stage 01 standalone API still starts without a configured database: `/health`, `/docs`, and `/openapi.json` remain available; `/api/*` without a token returns 401 even then. `/ready` returns HTTP 503 until PostgreSQL is reachable and its Alembic revision matches the application. `/health` checks the running application; `/ready` checks database readiness.

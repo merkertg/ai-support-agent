@@ -35,6 +35,7 @@ EXPECTED_TABLES = {
     "knowledge_documents",
     "agent_runs",
     "agent_suggestions",
+    "api_tokens",
 }
 # Таблицы checkpointer LangGraph (миграция 0004) не имеют SQLAlchemy-моделей.
 CHECKPOINT_TABLES = {

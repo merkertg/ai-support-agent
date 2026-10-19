@@ -2,6 +2,8 @@
 
 Адрес API задаёт администратор через окружение процесса. В браузере оператора
 нет поля для произвольного URL; перенаправления и повторы POST отключены.
+Каждый запрос несёт токен сотрудника из его сеанса: API по нему определяет
+автора решения и права. Токен не попадает в сообщения об ошибках.
 """
 
 import os
@@ -16,6 +18,14 @@ PAGE_SIZE = 20
 MAX_ID = 2**63 - 1
 # Id запроса из ответа API: по нему администратор находит строку журнала.
 REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{8,64}")
+# Формат токена сотрудника (app/services/auth.py): префикс и 43 символа base64url.
+STAFF_TOKEN = re.compile(r"asa_[A-Za-z0-9_-]{43}")
+UNAUTHORIZED = (
+    "Токен не принят: он неверный, отозван или истёк. "
+    "Проверьте токен или получите новый у администратора."
+)
+FORBIDDEN = "Недостаточно прав: это действие недоступно вашей роли."
+TOO_MANY = "Слишком много изменений подряд. Подождите немного и повторите."
 # 409 у анализа и решения означает разные состояния: подсказка зависит от действия.
 ANALYZE_CONFLICT = (
     "Анализ не запущен: обращение закрыто, уже анализируется или ждёт решения "
@@ -62,6 +72,17 @@ def configured_api_url() -> str:
     return value
 
 
+def staff_token(value: str) -> str:
+    """Проверить формат токена до запроса, не повторяя его в тексте ошибки."""
+    token = value.strip()
+    if not STAFF_TOKEN.fullmatch(token):
+        raise APIError(
+            "Токен сотрудника имеет неверный формат: он начинается с asa_ "
+            "и содержит 47 символов. Скопируйте его целиком."
+        )
+    return token
+
+
 def positive_id(value: int) -> int:
     """Не позволить подменить часть маршрута строкой или некорректным числом."""
     if type(value) is not int or not 1 <= value <= MAX_ID:
@@ -74,13 +95,16 @@ class APIClient:
 
     def __init__(
         self,
+        token: str,
         base_url: str | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        """Создать отдельный клиент одного запуска страницы с конечным тайм-аутом."""
+        """Создать клиент одного запуска страницы с токеном и конечным тайм-аутом."""
+        headers = {"Authorization": f"Bearer {staff_token(token)}"}
         self._client = httpx.Client(
             base_url=base_url or configured_api_url(),
+            headers=headers,
             timeout=httpx.Timeout(130, connect=5, write=10, pool=5),
             follow_redirects=False,
             transport=transport,
@@ -134,9 +158,12 @@ class APIClient:
     def _raise_error(response: httpx.Response, conflict: str | None = None) -> None:
         """Сопоставить код ответа безопасной подсказке без вывода тела ошибки."""
         messages = {
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
             404: "Запись не найдена. Проверьте её идентификатор.",
             409: "Запись уже существует или решение уже принято. Обновите данные.",
             422: "API отклонил форму. Проверьте обязательные поля и ограничения.",
+            429: TOO_MANY,
             502: "Внешний сервис вернул некорректный ответ. Попробуйте позже.",
             503: "Сервис временно недоступен. Проверьте состояние API, БД и индекса.",
             504: "Время выполнения истекло. Сначала проверьте историю запусков.",
@@ -150,6 +177,11 @@ class APIClient:
             pass
         if conflict is not None:
             messages[409] = conflict
+        retry_after = response.headers.get("Retry-After", "")
+        if retry_after.isascii() and retry_after.isdigit():
+            messages[429] = (
+                f"Слишком много изменений подряд. Повторите через {retry_after} с."
+            )
         request_id = response.headers.get("X-Request-ID", "")
         raise APIError(
             messages.get(response.status_code, "API не смог выполнить действие."),
@@ -157,6 +189,10 @@ class APIClient:
             run_id,
             request_id if REQUEST_ID.fullmatch(request_id) else None,
         )
+
+    def me(self) -> dict:
+        """Узнать имя и роль сотрудника, которому принадлежит токен."""
+        return self._request("GET", "/api/auth/me")
 
     def status(self, area: str) -> dict:
         """Прочитать только один из заранее известных статусов сервисов."""

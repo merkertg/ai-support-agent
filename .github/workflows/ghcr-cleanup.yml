@@ -1,0 +1,104 @@
+# Убираем из GHCR старые SHA-версии образов main. latest, vX.Y.Z и всё,
+# на что они ссылаются, не трогаем. По умолчанию — только план (dry-run).
+name: Clean up old GHCR SHA images
+
+on:
+  schedule:
+    # Воскресенье 04:23 UTC = 09:23 в Ташкенте.
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Удалять SHA-версии, не менявшиеся дольше стольких дней
+        type: number
+        default: 30
+      delete:
+        description: Удалить версии из плана (без отметки — только dry-run)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # План строится только с правом чтения пакетов: этот job ничего не удаляет.
+  plan:
+    name: Plan GHCR cleanup (dry-run)
+    # Fork и запуск с чужой ветки не получают доступ к нашим пакетам.
+    if: github.repository == 'merkertg/ai-support-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Python 3.12 входит в ubuntu-24.04; скрипт использует только stdlib.
+      - name: Select old SHA versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLEANUP_DAYS: ${{ inputs.days || vars.GHCR_CLEANUP_DAYS || 30 }}
+        run: |
+          python3 scripts/ghcr_cleanup.py --days "$CLEANUP_DAYS" \
+            --output reports/ghcr-cleanup-plan.json
+
+      - name: Upload cleanup plan
+        if: ${{ !cancelled() && hashFiles('reports/ghcr-cleanup-plan.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ghcr-cleanup-plan
+          path: reports/ghcr-cleanup-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Удаление — только по явной отметке delete при ручном запуске или когда
+  # владелец задал переменную репозитория GHCR_CLEANUP_DELETE=true.
+  delete:
+    name: Delete old GHCR SHA versions
+    needs: plan
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.delete) || (github.event_name == 'schedule' && vars.GHCR_CLEANUP_DELETE == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # GITHUB_TOKEN удаляет версии, если у репозитория роль Admin в пакете;
+    # пакет, опубликованный этим репозиторием из Actions, получает её сразу.
+    permissions:
+      contents: read
+      packages: write
+    # Общая очередь с publish: пока пишутся теги, ничего не удаляется.
+    # План пересчитывается внутри очереди по свежему состоянию пакетов.
+    concurrency:
+      group: ghcr-delivery
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Checkout trusted main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Delete selected versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLEANUP_DAYS: ${{ inputs.days || vars.GHCR_CLEANUP_DAYS || 30 }}
+        run: |
+          python3 scripts/ghcr_cleanup.py --days "$CLEANUP_DAYS" --delete \
+            --output reports/ghcr-cleanup-result.json
+
+      - name: Upload cleanup result
+        if: ${{ !cancelled() && hashFiles('reports/ghcr-cleanup-result.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ghcr-cleanup-result
+          path: reports/ghcr-cleanup-result.json
+          if-no-files-found: error
+          retention-days: 30

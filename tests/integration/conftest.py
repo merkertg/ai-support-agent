@@ -11,12 +11,54 @@ from alembic.config import Config
 from qdrant_client import QdrantClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.knowledge.embeddings import MockEmbedder
 from app.knowledge.index import KnowledgeIndex
+from app.models import User
+from app.schemas.auth import TokenCreate
+from app.services import auth
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def staff_principal() -> None:
+    """Отменить подмену аутентификации unit-тестов: здесь проверяются токены в БД.
+
+    Фикстура с тем же именем в tests/conftest.py подставляет администратора без
+    SQL. Интеграционные запросы передают настоящий заголовок Authorization.
+    """
+    return None
+
+
+def issue_staff_token(
+    engine: Engine,
+    *,
+    role: str = "admin",
+    email: str = "staff-admin@example.com",
+    name: str = "Тестовый администратор",
+) -> tuple[int, str]:
+    """Создать сотрудника в тестовой БД и выдать ему токен через сервис."""
+    with Session(engine) as session:
+        user = User(name=name, email=email, role=role)
+        session.add(user)
+        session.commit()
+        issued = auth.issue_token(session, user.id, TokenCreate(name="tests"))
+    return issued.user_id, issued.token
+
+
+def bearer(token: str) -> dict[str, str]:
+    """Заголовок запроса с токеном сотрудника."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def staff_headers(migrated_engine: Engine) -> dict[str, str]:
+    """Заголовок администратора тестовой БД для обычных запросов API."""
+    _, token = issue_staff_token(migrated_engine)
+    return bearer(token)
 
 
 @pytest.fixture(scope="session")

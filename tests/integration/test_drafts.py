@@ -42,7 +42,9 @@ def mock_provider(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[None]:
 
 
 @pytest.fixture
-def draft_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Session]]]:
+def draft_client(
+    migrated_engine: Engine, staff_headers: dict[str, str]
+) -> Iterator[tuple[TestClient, list[Session]]]:
     """Выдать каждому запросу отдельную наблюдаемую Session тестовой БД *_test."""
     sessions: list[Session] = []
 
@@ -59,7 +61,7 @@ def draft_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Ses
     previous_overrides = app.dependency_overrides.copy()
     app.dependency_overrides[get_api_session] = session_override
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers=staff_headers) as client:
             yield client, sessions
     finally:
         app.dependency_overrides.clear()

@@ -14,6 +14,9 @@ from operator_ui.client import (
     positive_id,
 )
 
+# Вымышленный токен правильного формата для заголовка Authorization.
+TOKEN = "asa_" + "k" * 43
+
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "1", 2**63])
 def test_reject_invalid_ids(value):
@@ -60,27 +63,39 @@ def test_requests_are_bounded_and_explicit():
         listed = request.url.path in {"/api/tickets", "/api/tickets/4/messages"}
         return httpx.Response(200, json=[] if listed else {"id": 1})
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         client.list_records("tickets", offset=20, customer_id=2, status=None, limit=999)
         client.get_record("tickets", 4)
         client.analyze(4, "hint")
-        client.review(8, {"decision": "reject", "reviewer_id": 1, "comment": "Причина"})
+        client.review(8, {"decision": "reject", "comment": "Причина"})
+        client.me()
         client.messages(4, offset=20)
         client.search("ошибка запуска", "server", 3)
         client.update_ticket_status(4, "in_progress")
         client.dashboard()
         client.status("llm")
-    assert len(captured) == 9
+    assert len(captured) == 10
+    # Каждый запрос несёт токен сотрудника сеанса.
+    assert {request.headers["Authorization"] for request in captured} == {
+        f"Bearer {TOKEN}"
+    }
+    assert captured[4].url.path == "/api/auth/me"
     assert dict(captured[0].url.params) == {
         "offset": "20",
         "limit": "20",
         "customer_id": "2",
     }
     assert json.loads(captured[2].content) == {"license_key": "hint"}
-    assert captured[6].method == "PATCH"
-    assert json.loads(captured[6].content) == {"status": "in_progress"}
-    assert captured[7].url.path == "/api/dashboard"
-    assert captured[4].url.params["limit"] == "20"
+    assert json.loads(captured[3].content) == {
+        "decision": "reject",
+        "comment": "Причина",
+    }
+    assert captured[7].method == "PATCH"
+    assert json.loads(captured[7].content) == {"status": "in_progress"}
+    assert captured[8].url.path == "/api/dashboard"
+    assert captured[5].url.params["limit"] == "20"
 
 
 @pytest.mark.parametrize(
@@ -101,7 +116,9 @@ def test_no_network_for_invalid_local_arguments(operation):
         """Падать, если локально отклонённый запрос всё же ушёл в сеть."""
         raise AssertionError("Запрос не должен исполняться")
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError):
             operation(client)
 
@@ -116,7 +133,9 @@ def test_timeout_never_retries_mutation(method):
         calls.append(request)
         raise httpx.ReadTimeout("secret.internal:5432?key=private")
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError, match="могло сохраниться") as raised:
             getattr(client, method)(1, None if method == "analyze" else "closed")
     assert len(calls) == 1
@@ -137,7 +156,9 @@ def test_error_hides_response_body_and_retains_run_id(code):
             headers={"Location": "http://other/private"},
         )
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError) as raised:
             client.analyze(1, None)
     assert len(calls) == 1
@@ -153,6 +174,7 @@ def test_error_hides_response_body_and_retains_run_id(code):
 def test_unexpected_success_body_is_safe(body):
     """Ответ успешного статуса тоже обязан иметь ожидаемую JSON-форму."""
     with APIClient(
+        TOKEN,
         "http://api",
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, content=body)
@@ -169,7 +191,9 @@ def test_network_error_does_not_expose_url():
         """Отклонить соединение с внутренним сервисом."""
         raise httpx.ConnectError("http://private-host:8000?secret=key")
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError, match="Нет соединения") as raised:
             client.status("llm")
     assert "private-host" not in str(raised.value)
@@ -193,7 +217,9 @@ def test_conflict_hint_depends_on_the_action(operation, expected):
         """Вернуть конфликт с текстом, который в интерфейс не переносится."""
         return httpx.Response(409, json={"detail": "internal detail"})
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError) as raised:
             operation(client)
     assert raised.value.status_code == 409
@@ -215,7 +241,71 @@ def test_error_keeps_only_safe_request_id(header, expected):
         """Вернуть ошибку сервера с id запроса в заголовке."""
         return httpx.Response(503, json={}, headers={"X-Request-ID": header})
 
-    with APIClient("http://api", transport=httpx.MockTransport(handler)) as client:
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
         with pytest.raises(APIError) as raised:
             client.dashboard()
     assert raised.value.request_id == expected
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "secret-token", "asa_short", "asa_" + "k" * 44, "asa_" + "к" * 43],
+)
+def test_malformed_token_is_rejected_before_network(token):
+    """Неверный формат токена: понятная ошибка без запроса и без самого токена."""
+
+    def handler(request):
+        """Падать, если клиент всё же отправил запрос."""
+        raise AssertionError("Запрос не должен исполняться")
+
+    with pytest.raises(APIError) as raised:
+        APIClient(token, "http://api", transport=httpx.MockTransport(handler))
+    assert "asa_" in str(raised.value)
+    assert token not in str(raised.value) or not token
+
+
+def test_token_with_spaces_is_trimmed():
+    """Пробелы вокруг скопированного токена не мешают входу."""
+    seen = []
+
+    def handler(request):
+        """Запомнить заголовок аутентификации."""
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"id": 1, "name": "Анна", "role": "admin"})
+
+    with APIClient(
+        f"  {TOKEN}\n", "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert client.me()["role"] == "admin"
+    assert seen == [f"Bearer {TOKEN}"]
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        (401, {}, "Токен не принят"),
+        (403, {}, "Недостаточно прав"),
+        (429, {"Retry-After": "12"}, "Повторите через 12 с"),
+        (429, {"Retry-After": "<b>"}, "Подождите немного"),
+    ],
+)
+def test_auth_and_rate_limit_errors_are_explained(status, headers, expected):
+    """401, 403 и 429 получают понятные подсказки без текста ответа сервера."""
+
+    def handler(request):
+        """Вернуть отказ API с внутренним текстом, который нельзя показывать."""
+        return httpx.Response(
+            status, headers=headers, json={"detail": "internal PRIVATE detail"}
+        )
+
+    with APIClient(
+        TOKEN, "http://api", transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(APIError) as raised:
+            client.review(1, {"decision": "approve"})
+    assert expected in str(raised.value)
+    assert raised.value.status_code == status
+    assert "PRIVATE" not in str(raised.value)
+    assert TOKEN not in str(raised.value)

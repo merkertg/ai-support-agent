@@ -254,7 +254,19 @@ def test_agent_openapi_documents_optional_input_and_failure_run_id() -> None:
         schema = client.get("/openapi.json").json()
     post = schema["paths"]["/api/tickets/{resource_id}/analyze"]["post"]
     assert not post["requestBody"].get("required", False)
-    assert set(post["responses"]) == {"201", "404", "413", "422", "502", "503", "504"}
+    assert set(post["responses"]) == {
+        "201",
+        "401",
+        "403",
+        "404",
+        "413",
+        "422",
+        "429",
+        "502",
+        "503",
+        "504",
+    }
+    assert post["security"] == [{"StaffToken": []}]
     assert (
         schema["components"]["schemas"]["AnalyzeRequest"]["additionalProperties"]
         is False

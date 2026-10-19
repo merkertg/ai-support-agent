@@ -50,7 +50,11 @@ TicketPriority = Literal["low", "medium", "high", "critical"]
 TicketStatus = Literal["open", "in_progress", "waiting_customer", "resolved", "closed"]
 # Закрытое обращение не анализируется и не получает доставку ответа.
 CLOSED_TICKET_STATUSES = frozenset({"resolved", "closed"})
-UserRole = Literal["operator", "admin"]
+UserRole = Literal["operator", "reviewer", "admin"]
+# Лестница прав: каждая следующая роль умеет всё, что предыдущая.
+# operator работает с обращениями, reviewer ещё и решает по предложениям агента,
+# admin также управляет сотрудниками и их токенами.
+ROLE_LEVELS: dict[str, int] = {"operator": 1, "reviewer": 2, "admin": 3}
 
 
 class CreateSchema(BaseModel):
@@ -157,7 +161,7 @@ class TicketRead(ReadSchema):
 
 
 class UserCreate(CreateSchema):
-    """Сотрудник поддержки; пароля и входа в систему на этом этапе нет."""
+    """Сотрудник поддержки; доступ к API даёт отдельно выданный токен."""
 
     name: Name
     email: Annotated[EmailStr, Field(max_length=320)]
@@ -165,7 +169,7 @@ class UserCreate(CreateSchema):
 
 
 class UserRead(ReadSchema):
-    """Публичные поля сотрудника, который может рассматривать предложения."""
+    """Публичные поля сотрудника; решения принимают роли reviewer и admin."""
 
     id: int
     name: str
@@ -176,6 +180,6 @@ class UserRead(ReadSchema):
 
 
 class ErrorRead(ReadSchema):
-    """Безопасная форма ожидаемой ошибки 404, 409 или 503 в Swagger."""
+    """Безопасная форма ожидаемой ошибки 401, 403, 404, 409, 429 или 503."""
 
     detail: str

@@ -2,11 +2,11 @@
 
 A Python learning project for a technical support assistant. It helps an operator investigate tickets, check customer licenses, search documentation, and review suggested replies before simulated delivery. TechFlow products and all support data are fictional.
 
-The project implements **all ten stages**: a FastAPI service with PostgreSQL 17 and Qdrant 1.19, REST APIs for customers, products, licenses, tickets, and support staff, LLM draft previews, and a bounded agent. The agent reads ticket data and searches a Markdown knowledge base through five read-only tools, then saves a `pending` reply suggestion that cites only the articles it found. A LangGraph workflow pauses until an employee approves or rejects the suggestion; approval delivers the reply as a ticket message. A Streamlit operator interface works on top of the HTTP API, offline evaluations measure search quality and server-side safety guarantees, and a repeatable demo scenario prepares a pending suggestion for a human decision. The default mock mode needs no API key; OpenAI providers require explicit credentials. GitHub Actions checks the application, builds and smoke-tests the API and UI images, runs the evaluations and the demo scenario, and publishes both tested images to GHCR after a push to main or a validated version tag. CI requires at least 85% combined line/branch coverage; abandoned agent runs recover automatically, and weekly dependency updates arrive as reviewable pull requests.
+The project implements **all ten stages**: a FastAPI service with PostgreSQL 17 and Qdrant 1.19, REST APIs for customers, products, licenses, tickets, and support staff, LLM draft previews, and a bounded agent. The agent reads ticket data and searches a Markdown knowledge base through five read-only tools, then saves a `pending` reply suggestion that cites only the articles it found. A LangGraph workflow pauses until an employee approves or rejects the suggestion; approval delivers the reply as a ticket message. A Streamlit operator interface works on top of the HTTP API, offline evaluations measure search quality and server-side safety guarantees, and a repeatable demo scenario prepares a pending suggestion for a human decision. Every `/api/*` route requires a staff API token (stored only as a SHA-256 hash) with one of three roles — `operator`, `reviewer`, `admin`; the author of a review decision comes from the token, and changes are rate-limited per employee. The default mock mode needs no API key; OpenAI providers require explicit credentials. GitHub Actions checks the application, builds and smoke-tests the API and UI images, runs the evaluations and the demo scenario, and publishes both tested images to GHCR after a push to main or a validated version tag. CI requires at least 85% combined line/branch coverage; abandoned agent runs recover automatically, and weekly dependency updates arrive as reviewable pull requests.
 
 Linux, macOS (Intel and Apple Silicon) and Windows are supported: CI runs the Python checks and a real API/UI start on all three, and builds the Docker images for amd64 and arm64, publishing both under one GHCR tag.
 
-**Начни с [демонстрации](docs/DEMO.md)** или с [быстрого запуска](docs/instructions/quickstart.md). Интерфейс оператора после запуска: <http://127.0.0.1:8502>.
+**Начни с [демонстрации](docs/DEMO.md)** или с [быстрого запуска](docs/instructions/quickstart.md). Интерфейс оператора после запуска: <http://127.0.0.1:8502>; вход — токеном сотрудника, первый токен администратора выдаёт команда `docker compose exec -T api python -m app.tokens issue --email admin@example.com --name 'Administrator' --role admin`.
 
 ## Roadmap
 
@@ -22,6 +22,7 @@ Linux, macOS (Intel and Apple Silicon) and Windows are supported: CI runs the Py
 | 08 | Streamlit operator interface | Implemented; tickets, review queue, knowledge search, dashboard and catalogs over the HTTP API; separate UI image |
 | 09 | Agent integration tests, evaluations and security checks | Implemented; offline retrieval metrics with fixed thresholds and 12 agent safety scenarios gate CI; live OpenAI quality is not measured |
 | 10 | Packaging, CI/CD, and GitHub demonstration materials | Implemented; Compose stack with UI, idempotent demo scenario, demo guide, CI/GHCR delivery |
+| + | Staff authentication, roles, and write rate limit | Implemented; hashed API tokens, `operator`/`reviewer`/`admin`, reviewer from the token, 401/403/429 checked in tests, smoke and CI |
 
 ## Documentation
 
@@ -29,7 +30,7 @@ Instructions ([docs/instructions/](docs/instructions/)):
 
 - [Quickstart](docs/instructions/quickstart.md): requirements, supported platforms, Compose stack with the operator UI, updating an existing stack, knowledge base indexing, host run
 - [Windows and PowerShell](docs/instructions/windows.md): Git Bash, WSL or PowerShell; equivalents of every Bash construct used in the guides
-- [Using the API](docs/instructions/usage.md): business records, draft previews, knowledge search, agent, human review
+- [Using the API](docs/instructions/usage.md): staff tokens, roles and rate limit, business records, draft previews, knowledge search, agent, human review
 - [Testing and verification](docs/instructions/testing.md): lint, unit and integration tests, coverage gate, offline evaluations, portability checks
 - [CI and delivery to GHCR](docs/instructions/ci-and-delivery.md)
 - [Project structure](docs/instructions/project-structure.md)
@@ -45,7 +46,7 @@ Stage learning guides in Russian:
 - [Stage 07: LangGraph workflow and human review](docs/STAGE_07.md)
 - [Stage 08: Streamlit operator interface](docs/STAGE_08.md)
 - [Stage 09: evaluations and security checks](docs/STAGE_09.md)
-- [Stage 10: packaging and reproducible demo](docs/STAGE_10.md)
+- [Stage 10: packaging and reproducible demo](docs/STAGE_10.md), including staff tokens and roles
 - [Demo walkthrough](docs/DEMO.md)
 - [CI/CD and Docker guide](docs/CI_CD.md)
 - [Наглядное руководство PDF](docs/guide/ai-support-agent-guide.pdf) и [его пересборка](docs/guide/README.md)

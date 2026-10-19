@@ -270,19 +270,24 @@ def review_suggestion(
     suggestion_id: int,
     request: ReviewRequest,
     checkpointer_factory: CheckpointerFactory,
+    reviewer_id: int,
 ) -> ReviewResultRead:
     """Применить решение сотрудника: продолжить граф или сохранить напрямую.
 
+    reviewer_id — сотрудник аутентифицированного токена, а не поле тела.
     Advisory lock PostgreSQL по id предложения выстраивает параллельные
     решения в очередь: второе увидит, что предложение уже рассмотрено.
     Предложения, созданные до этапа 07, не имеют потока и решаются напрямую.
     """
-    review = request.model_dump() | {"review_id": uuid4().hex}
+    review = request.model_dump() | {
+        "review_id": uuid4().hex,
+        "reviewer_id": reviewer_id,
+    }
     engine = session.get_bind()
     with Session(engine) as lock_session, lock_session.begin():
         lock_session.execute(select(func.pg_advisory_xact_lock(suggestion_id)))
         run = reviews.check_reviewable(
-            lock_session, suggestion_id, request.reviewer_id, request.decision
+            lock_session, suggestion_id, reviewer_id, request.decision
         )
         thread_id = run.workflow_thread_id
         if thread_id is None:

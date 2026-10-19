@@ -17,6 +17,9 @@ app/
     knowledge.py         # Knowledge search and index status routes
     reviews.py           # Suggestion queue, review decision and workflow state
     operator.py          # Dashboard, run history, ticket messages and status for the UI
+    auth.py              # Current employee, staff tokens: issue, list, revoke
+    security.py          # Bearer token check, role ladder and write rate limit
+    rate_limit.py        # In-process token bucket per employee
     dependencies.py      # Request sessions and safe database errors
   schemas/               # Validated resources, drafts and agent runs
   llm/                   # Independent settings, mock/OpenAI clients and safe errors
@@ -25,7 +28,9 @@ app/
   workflow/              # LangGraph review graph, PostgreSQL checkpointer, service
   services/              # Business checks, queries and explicit transactions
                          # run_recovery.py finishes abandoned running analyses
-  config.py              # DATABASE_URL from environment or .env
+                         # auth.py issues, checks and revokes hashed staff tokens
+  config.py              # DATABASE_URL and the write rate limit from env or .env
+  tokens.py              # CLI: python -m app.tokens issue | list | revoke
   console.py             # UTF-8 output for command-line tools on any OS
   observability.py       # JSON log, X-Request-ID middleware, safe error fields
   db/
@@ -33,10 +38,11 @@ app/
     session.py           # Lazy engine and request-scoped sessions
     demo.py              # Explicit idempotent seed and read-only show
   models/
-    entities.py          # Nine relational models
+    entities.py          # Ten relational models, including hashed API tokens
 migrations/
   env.py                 # Alembic execution and database URL handling
-  versions/              # Stage 02 schema, 05 agent runs, 06 index registry, 07 review
+  versions/              # Stage 02 schema, 05 agent runs, 06 index registry, 07 review,
+                         # 0005 staff tokens and the reviewer role
 knowledge/               # Fictional Markdown support articles for the knowledge base
 operator_ui/
   main.py                # Streamlit entry point: streamlit run operator_ui/main.py
@@ -61,6 +67,7 @@ tests/
   test_knowledge_*.py    # Articles, embeddings, in-memory Qdrant index and search API
   test_workflow.py       # LangGraph graph on an in-memory checkpointer
   test_review_api.py     # Review and staff HTTP validation
+  test_security_api.py   # 401 on every /api route, roles, rate limit, token checks
   test_operator_*.py     # Operator API, UI HTTP client and Streamlit AppTest
   test_evaluations.py    # Metrics, labels and evaluation CLI exit codes
   test_observability.py  # Request ids, JSON log lines, no secrets or SQL in logs
@@ -73,7 +80,8 @@ tests/
   test_release_delivery.py    # Release tags, image export and GHCR publication
   test_update_dependencies.py # Weekly dependency PR preparation and writer
   test_project_checks.py # Docstrings, links, Bash and PowerShell examples
-  conftest.py            # In-memory checkpointer for every test by default
+  conftest.py            # In-memory checkpointer and a test admin for unit tests
+                         # (integration tests send real tokens instead)
 scripts/
   smoke_test.py          # Health, readiness, API, knowledge, draft, agent and review checks
   check_project.py       # Docstrings, Markdown links, Bash, PowerShell and JSON examples

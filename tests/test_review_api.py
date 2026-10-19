@@ -37,21 +37,19 @@ def client_and_session() -> Iterator[tuple[TestClient, Mock]]:
     "body",
     [
         {},
-        {"decision": "approve"},
-        {"decision": "maybe", "reviewer_id": 1},
-        {"decision": "approve", "reviewer_id": "1"},
-        {"decision": "approve", "reviewer_id": 0},
-        {"decision": "reject", "reviewer_id": 1},
-        {"decision": "reject", "reviewer_id": 1, "comment": "  "},
-        {"decision": "reject", "reviewer_id": 1, "comment": "x" * 2001},
+        {"decision": "maybe"},
+        # Автора задаёт токен: поле reviewer_id в теле запрещено.
+        {"decision": "approve", "reviewer_id": 1},
+        {"decision": "reject"},
+        {"decision": "reject", "comment": "  "},
+        {"decision": "reject", "comment": "x" * 2001},
         {
             "decision": "reject",
-            "reviewer_id": 1,
             "comment": "Неверно",
             "final_content": "Текст",
         },
-        {"decision": "approve", "reviewer_id": 1, "final_content": ""},
-        {"decision": "approve", "reviewer_id": 1, "status": "approved"},
+        {"decision": "approve", "final_content": ""},
+        {"decision": "approve", "status": "approved"},
     ],
 )
 def test_invalid_review_is_rejected_before_service(
@@ -68,9 +66,9 @@ def test_invalid_review_is_rejected_before_service(
 
 
 def test_valid_review_reaches_workflow_service(
-    client_and_session, monkeypatch: pytest.MonkeyPatch
+    client_and_session, monkeypatch: pytest.MonkeyPatch, staff_principal
 ) -> None:
-    """Корректное тело передаётся сервису с нормализованным текстом."""
+    """Корректное тело и автор из токена передаются сервису."""
     client, session = client_and_session
     review = Mock(
         side_effect=workflow.ResourceNotFound("Предложение агента не найдено")
@@ -78,12 +76,14 @@ def test_valid_review_reaches_workflow_service(
     monkeypatch.setattr(workflow, "review_suggestion", review)
     response = client.post(
         "/api/suggestions/3/review",
-        json={"decision": "approve", "reviewer_id": 2, "final_content": "  Ответ  "},
+        json={"decision": "approve", "final_content": "  Ответ  "},
     )
     assert response.status_code == 404
-    session_arg, suggestion_id, request, _ = review.call_args.args
+    session_arg, suggestion_id, request, _, reviewer_id = review.call_args.args
     assert (session_arg, suggestion_id) == (session, 3)
     assert request.final_content == "Ответ"
+    # Автор решения — сотрудник аутентифицированного токена (tests/conftest.py).
+    assert reviewer_id == staff_principal.user_id
 
 
 @pytest.mark.parametrize(
@@ -97,7 +97,7 @@ def test_valid_review_reaches_workflow_service(
     ],
 )
 def test_invalid_user_is_rejected(client_and_session, body: dict) -> None:
-    """Сотрудник требует имя, email и роль operator или admin; лишнее запрещено."""
+    """Сотрудник требует имя, email и роль operator, reviewer или admin."""
     client, session = client_and_session
     response = client.post("/api/users", json=body)
     assert response.status_code == 422, response.text
@@ -117,11 +117,7 @@ def test_invalid_path_or_filter_is_rejected(client_and_session, path: str) -> No
     """Неверный id или фильтр отклоняется до SQL-запроса."""
     client, session = client_and_session
     method = client.post if path.endswith("/review") else client.get
-    kwargs = (
-        {"json": {"decision": "approve", "reviewer_id": 1}}
-        if method == client.post
-        else {}
-    )
+    kwargs = {"json": {"decision": "approve"}} if method == client.post else {}
     response = method(path, **kwargs)
     assert response.status_code == 422, response.text
     session.execute.assert_not_called()
@@ -132,13 +128,14 @@ def test_openapi_documents_review_and_workflow() -> None:
     schema = application.app.openapi()
     paths = schema["paths"]
     review = paths["/api/suggestions/{resource_id}/review"]["post"]
-    assert {"200", "404", "409", "422"} <= set(review["responses"])
+    assert {"200", "401", "403", "404", "409", "422", "429"} <= set(review["responses"])
     assert "get" in paths["/api/suggestions"]
     assert "get" in paths["/api/agent-runs/{resource_id}/workflow"]
     assert {"get", "post"} <= set(paths["/api/users"])
     request = schema["components"]["schemas"]["ReviewRequest"]
     assert request["additionalProperties"] is False
-    assert set(request["required"]) == {"decision", "reviewer_id"}
+    assert set(request["required"]) == {"decision"}
+    assert "reviewer_id" not in request["properties"]
 
 
 @pytest.mark.parametrize("error_type", [OperationalError, PoolTimeout])
@@ -155,7 +152,7 @@ def test_direct_checkpointer_errors_are_safe_503(
     else:
         response = client.post(
             "/api/suggestions/3/review",
-            json={"decision": "approve", "reviewer_id": 2},
+            json={"decision": "approve"},
         )
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": DATABASE_ERROR}

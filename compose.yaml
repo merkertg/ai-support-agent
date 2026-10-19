@@ -87,6 +87,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Старые running-запуски завершаются безопасным фоновым восстановлением.
       RUN_RECOVERY_ENABLED: ${RUN_RECOVERY_ENABLED:-true}
+      # Лимит изменений одного сотрудника в минуту (токены — в таблице api_tokens).
+      WRITE_RATE_LIMIT_PER_MINUTE: ${WRITE_RATE_LIMIT_PER_MINUTE:-60}
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"
     depends_on:
@@ -104,7 +106,8 @@ services:
       retries: 20
       start_period: 5s
 
-  # Этап 08: интерфейс оператора. Обращается только к API, БД и ключей не получает.
+  # Этап 08: интерфейс оператора. Обращается только к API, БД и ключей не получает;
+  # сотрудник входит своим токеном API, который хранится только в его сеансе.
   ui:
     image: ${UI_IMAGE:-ai-support-agent-ui:local}
     build:

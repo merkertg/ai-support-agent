@@ -83,7 +83,9 @@ def memory_index_factory(engine: Engine | None = None):
 
 
 @pytest.fixture
-def agent_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Session]]]:
+def agent_client(
+    migrated_engine: Engine, staff_headers: dict[str, str]
+) -> Iterator[tuple[TestClient, list[Session]]]:
     """Выдать каждому запросу отдельную наблюдаемую Session тестовой БД *_test."""
     sessions: list[Session] = []
 
@@ -102,7 +104,7 @@ def agent_client(migrated_engine: Engine) -> Iterator[tuple[TestClient, list[Ses
     factory = memory_index_factory(migrated_engine)
     app.dependency_overrides[get_knowledge_factory] = lambda: factory
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers=staff_headers) as client:
             yield client, sessions
     finally:
         app.dependency_overrides.clear()

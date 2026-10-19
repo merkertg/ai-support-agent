@@ -442,6 +442,24 @@ jobs:
           docker logs "$ui" 2>&1 | tail -20
           exit 1
 
+      # Состав каждого из четырёх проверенных образов в CycloneDX тем же Trivy.
+      # Для SBOM база уязвимостей не нужна; ImageID в файле совпадает с ID
+      # образа, и publish прикладывает SBOM только к тому же образу.
+      - name: Generate SBOM for tested images
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        run: |
+          mkdir -p reports/sbom "$RUNNER_TEMP/trivy-cache"
+          for image in ai-support-agent:ci ai-support-agent-ui:ci \
+            ai-support-agent:ci-arm64 ai-support-agent-ui:ci-arm64; do
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$RUNNER_TEMP/trivy-cache:/cache" \
+              -v "$PWD/reports/sbom:/reports" \
+              "$TRIVY_IMAGE" --cache-dir /cache image --quiet \
+              --format cyclonedx --output "/reports/${image/:/-}.cdx.json" "$image"
+          done
+
       # Известные уязвимости ОС и Python-пакетов во всех четырёх образах. Trivy запускается
       # образом, закреплённым по digest, без trivy-action: в марте 2026 теги
       # trivy-action и образы Trivy 0.69.4–0.69.6 были подменены (CVE-2026-33634).
@@ -490,6 +508,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload SBOM
+        if: ${{ !cancelled() && hashFiles('reports/sbom/*.cdx.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: reports/sbom/
+          if-no-files-found: error
+          retention-days: 30
+
       # Compose ждёт PostgreSQL, применяет миграцию и проверяет /ready API.
       # --no-build гарантирует использование только что собранного образа.
       - name: Start database, migrations and API
@@ -504,8 +531,21 @@ jobs:
             python -m app.knowledge.ingest | tee ingest.json
           python3 -c 'import json; r = json.load(open("ingest.json")); assert r["documents"] >= 1 and r["indexed"] and not r["removed"]'
 
+      # Каждый маршрут /api/* требует токен сотрудника. Первого администратора
+      # создаёт команда в контейнере API; токен живёт сутки, маскируется в журнале
+      # Actions и передаётся следующим шагам через API_TOKEN, а не аргументом.
+      - name: Issue CI administrator token
+        run: |
+          token="$(docker compose --project-name ai-support-ci exec -T api \
+            python -m app.tokens issue --email ci-admin@example.com \
+            --name "CI administrator" --role admin --label ci-smoke --days 1)"
+          test -n "$token"
+          echo "::add-mask::$token"
+          echo "API_TOKEN=$token" >> "$GITHUB_ENV"
+
       # --check-review включает БД, API, базу знаний, mock-черновик, запуск агента
-      # и решение сотрудника. Журнал нужен следующему шагу: из него берётся ID запуска.
+      # и решение сотрудника: 401 без токена, 403 для роли operator, отзыв токена
+      # и автор решения из токена. Журнал нужен следующему шагу: из него ID запуска.
       - name: Check HTTP endpoints, knowledge search, agent run and review
         run: |
           python3 scripts/smoke_test.py \
@@ -527,10 +567,13 @@ jobs:
           # Запуск агента тоже должен пережить пересоздание контейнеров.
           run_path="$(grep -o -m 1 '/api/agent-runs/[0-9]*' smoke.log)"
           test -n "$run_path"
-          curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-before.json
+          # Токен хранится в PostgreSQL и тоже переживает пересоздание контейнеров.
+          auth="Authorization: Bearer $API_TOKEN"
+          curl --fail --silent --show-error -H "$auth" \
+            "http://127.0.0.1:8000$run_path" > run-before.json
           # Индекс Qdrant хранится в томе и тоже должен пережить пересоздание.
           search='{"query":"Сервер не запускается после обновления","product_code":"techflow-server"}'
-          curl --fail --silent --show-error -H 'Content-Type: application/json' \
+          curl --fail --silent --show-error -H "$auth" -H 'Content-Type: application/json' \
             -d "$search" http://127.0.0.1:8000/api/knowledge/search > knowledge-before.json
           # down без --volumes сохраняет named volume, но удаляет контейнеры.
           docker compose --project-name ai-support-ci down
@@ -539,16 +582,18 @@ jobs:
           docker compose --project-name ai-support-ci exec -T api \
             python -m app.db.demo show > after.json
           cmp before.json after.json
-          curl --fail --silent --show-error "http://127.0.0.1:8000$run_path" > run-after.json
+          curl --fail --silent --show-error -H "$auth" \
+            "http://127.0.0.1:8000$run_path" > run-after.json
           cmp run-before.json run-after.json
-          curl --fail --silent --show-error -H 'Content-Type: application/json' \
+          curl --fail --silent --show-error -H "$auth" -H 'Content-Type: application/json' \
             -d "$search" http://127.0.0.1:8000/api/knowledge/search > knowledge-after.json
           cmp knowledge-before.json knowledge-after.json
           # Повторная индексация после пересоздания ничего не переписывает.
           docker compose --project-name ai-support-ci exec -T api \
             python -m app.knowledge.ingest > ingest-again.json
           python3 -c 'import json; r = json.load(open("ingest-again.json")); assert r["indexed"] == [] and r["removed"] == [] and r["unchanged"]'
-          # Решение по запуску, начатому до пересоздания: LangGraph продолжает поток.
+          # Решение по запуску, начатому до пересоздания: LangGraph продолжает поток,
+          # автор решения — сотрудник API_TOKEN.
           pending_run="$(grep -o -m 1 '/api/agent-runs/[0-9]*' pending.log | grep -o '[0-9]*$')"
           test -n "$pending_run"
           python3 scripts/smoke_test.py \
@@ -558,7 +603,8 @@ jobs:
             --base-url http://127.0.0.1:8000 --timeout 30 --check-review
 
       # Этапы 08 и 10: UI ждёт healthy API; страница отрисовывается из контейнера
-      # настоящим AppTest, демонстрационный сценарий повторяется без изменений.
+      # настоящим AppTest после ввода токена, демонстрационный сценарий
+      # повторяется без изменений. Демо и UI работают от имени сотрудника API_TOKEN.
       - name: Start operator UI and run demo scenario
         run: |
           docker compose --project-name ai-support-ci up \
@@ -579,9 +625,14 @@ jobs:
           python3 scripts/demo_scenario.py \
             --url http://127.0.0.1:8000 --timeout 60 --verify-review > demo-again.json
           cmp demo.json demo-again.json
-          docker compose --project-name ai-support-ci exec -T ui python -c '
+          docker compose --project-name ai-support-ci exec -T -e "API_TOKEN=$API_TOKEN" \
+            ui python -c '
+          import os
           from streamlit.testing.v1 import AppTest
           screen = AppTest.from_file("operator_ui/main.py", default_timeout=30).run()
+          assert not screen.exception, screen.exception
+          assert not screen.metric, "без токена данные не показываются"
+          screen.sidebar.text_input(key="api_token").input(os.environ["API_TOKEN"]).run()
           assert not screen.exception, screen.exception
           assert not screen.error, [item.value for item in screen.error]
           metrics = {item.label: item.value for item in screen.metric}
@@ -589,14 +640,23 @@ jobs:
           print("OK ui page:", metrics)
           '
 
-      # Журнал API — JSON без query string и тел запросов. Smoke и демо отправляли
-      # ключи лицензий в теле и в фильтре ?license_key=: в логах их быть не должно.
-      - name: Check API logs for request records and leaked license keys
+      # Журнал API — JSON без query string, заголовков и тел запросов. Smoke и демо
+      # отправляли ключи лицензий в теле и в фильтре ?license_key=, а токены
+      # сотрудников — в Authorization: в логах их быть не должно. Строка запроса
+      # называет сотрудника полем user_id.
+      - name: Check API logs for request records and leaked secrets
         run: |
           docker compose --project-name ai-support-ci logs --no-color api > api.log
           grep -q '"event": "request"' api.log
+          grep -q '"user_id": ' api.log
+          grep -q '"event": "auth_failed"' api.log
           if grep -n -e 'SMOKE-' -e 'DEMO-STAGE10' api.log; then
             echo "Ключ лицензии попал в журнал API" >&2
+            exit 1
+          fi
+          # Строку с токеном не печатаем: совпадение само по себе — утечка.
+          if grep -q -E 'asa_[A-Za-z0-9_-]{43}' api.log; then
+            echo "Токен сотрудника попал в журнал API" >&2
             exit 1
           fi
 
@@ -635,11 +695,14 @@ jobs:
     needs: container
     if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
-    # Четыре образа (API/UI × amd64/arm64) и общие index-теги для каждого пакета.
-    timeout-minutes: 25
+    # Четыре образа (API/UI × amd64/arm64), общие index-теги, подписи и SBOM.
+    timeout-minutes: 30
+    # id-token: write нужен только cosign keyless: GitHub выдаёт OIDC-токен,
+    # Fulcio — короткий сертификат на identity этого workflow. Ключей нет.
     permissions:
       contents: read
       packages: write
+      id-token: write
     # Main и релизы используют одну очередь: version preflight обоих пакетов
     # и публикация не пересекаются с другой публикацией этого workflow.
     concurrency:
@@ -659,6 +722,29 @@ jobs:
         with:
           name: tested-docker-images
           path: image-artifact
+
+      # SBOM тех же четырёх образов; publish сверит в них image ID до записи.
+      - name: Download SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: sbom
+
+      # Официальный выпуск cosign, сверенный по SHA256 из workflow, как actionlint.
+      # Ставится до публикации: без cosign job останавливается до первой записи.
+      - name: Install cosign
+        if: ${{ vars.GHCR_PUBLIC_SIGNING == 'true' }}
+        run: |
+          tools_dir="$RUNNER_TEMP/cosign"
+          mkdir -p "$tools_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 \
+            --output "$tools_dir/cosign"
+          printf '%s  %s\n' \
+            '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71' \
+            "$tools_dir/cosign" | sha256sum --check --strict
+          chmod +x "$tools_dir/cosign"
+          printf '%s\n' "$tools_dir" >> "$GITHUB_PATH"
 
       # GITHUB_TOKEN выдаётся автоматически; PAT не нужен.
       - name: Log in to GHCR
@@ -682,10 +768,30 @@ jobs:
           main_sha="$(python3 -c "import json; print(json.load(open('main-ref.json'))['object']['sha'])")"
           printf 'MAIN_SHA=%s\n' "$main_sha" >> "$GITHUB_ENV"
 
-      # Сначала проверяются ID и платформы всех четырёх образов и все теги версии.
-      # Совпавший тег повторно не пишется; конфликт останавливает job до записи.
-      # Затем imagetools create связывает amd64 и arm64 в общий тег пакета.
+      # Сначала проверяются ID и платформы всех четырёх образов, их SBOM и все
+      # теги версии. Совпавший тег повторно не пишется; конфликт останавливает
+      # job до записи. Затем imagetools create связывает amd64 и arm64 в общий
+      # тег пакета. Digest записываются в published-images.json.
       - name: Verify and publish tested API and UI images
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/release_delivery.py publish
+
+      # Подписывается digest index из отчёта, а не изменяемый тег. SBOM каждой
+      # архитектуры прикладывается attestation к manifest из этого index.
+      # cosign verify сразу проверяет identity ci.yml, OIDC GitHub и SHA commit.
+      # Сертификат и запись попадают в публичный журнал Sigstore (Rekor).
+      - name: Sign indexes and attach SBOM attestations
+        if: ${{ vars.GHCR_PUBLIC_SIGNING == 'true' }}
+        run: python3 scripts/release_delivery.py sign
+
+      # По выбору пользователя раскрытие metadata в Rekor выключено по умолчанию.
+      # Включение: Settings → Secrets and variables → Actions → Variables.
+      - name: Report deferred public signing
+        if: ${{ vars.GHCR_PUBLIC_SIGNING != 'true' }}
+        run: |
+          printf '%s\n' \
+            '### Подпись подготовлена, но выключена' \
+            'SBOM проверен и сохранён как артефакт. Публикация образов завершена без публичной записи Sigstore.' \
+            'Для включения keyless-подписи и SBOM attestations задай GHCR_PUBLIC_SIGNING=true в Actions Variables.' \
+            >> "$GITHUB_STEP_SUMMARY"

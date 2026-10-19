@@ -9,7 +9,7 @@ from sqlalchemy.exc import ArgumentError
 
 
 class Settings(BaseSettings):
-    """Прочитать конфигурацию один раз и проверить адрес PostgreSQL.
+    """Прочитать конфигурацию один раз: адрес PostgreSQL и лимит изменений.
 
     Переменная окружения DATABASE_URL имеет приоритет над файлом .env.
     Отсутствующий адрес допустим: /health продолжает работать, а /ready
@@ -25,6 +25,8 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
     database_url: str | None = Field(default=None, repr=False)
+    # Сколько изменений (POST/PATCH/DELETE) один сотрудник делает за минуту.
+    write_rate_limit_per_minute: int = Field(default=60, ge=1, le=10_000)
 
     @field_validator("database_url")
     @classmethod

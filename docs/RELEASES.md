@@ -1,5 +1,14 @@
 # Версии и публикация API и UI
 
+> **Текущая настройка подписи:** по выбору пользователя от 19.10.2026
+> публичная keyless-подпись и SBOM attestations подготовлены, но **выключены**.
+> Для включения владелец задаёт `GHCR_PUBLIC_SIGNING=true` в GitHub → Settings →
+> Secrets and variables → Actions → Variables. Это разрешает публикацию metadata
+> в Rekor. Без этой переменной установка cosign и шаг `sign` пропускаются;
+> сборки, проверка SBOM, артефакт `sbom` и публикация API/UI в GHCR работают.
+> Разделы о cosign ниже описывают поведение после явного включения.
+
+
 [← README](../README.md) · [CI/CD подробно](CI_CD.md)
 
 Проект публикует два отдельных Docker-образа в GitHub Container Registry:
@@ -18,9 +27,16 @@ UI обращается к API через HTTP. Ему не нужны ключ 
 к PostgreSQL и серверный код. Оба образа проходят отдельные проверки состава,
 пользователя, известных уязвимостей и реальный сценарий совместной работы.
 
+Общий тег каждого пакета подписан cosign без ключей (keyless) от имени
+workflow `ci.yml`, а к образу каждой архитектуры приложен SBOM в формате
+CycloneDX — список ОС-пакетов и Python-зависимостей. Как проверить подпись
+и получить SBOM, описано в [разделе 5](#5-подпись-cosign-и-sbom).
+
 Настройка доставки реализована в `.github/workflows/ci.yml` и
 `scripts/release_delivery.py`. Она не создаёт Git-теги и GitHub Releases
-автоматически: номер версии выбирает человек.
+автоматически: номер версии выбирает человек. Старые SHA-версии main
+удаляет отдельный workflow очистки ([раздел 10](#10-очистка-старых-sha-версий));
+`latest` и версии `vX.Y.Z` он не трогает.
 
 ## 1. Когда запускается публикация
 
@@ -52,11 +68,11 @@ UI обращается к API через HTTP. Ему не нужны ключ 
 ```text
 Validate delivery target
           ↓
-Python checks + Audit runtime dependencies
-          ↓ оба успешны
-Build and smoke test Docker
+Python checks + Audit runtime dependencies + Python on Linux/macOS/Windows
+          ↓ все успешны
+Build and smoke test Docker (включая SBOM четырёх образов)
           ↓
-Publish tested image to GHCR
+Publish tested image to GHCR → подпись index и SBOM-attestation → cosign verify
 ```
 
 Для тегов первый job требует строгий формат `vX.Y.Z`, например `v0.1.0`
@@ -78,6 +94,11 @@ workflow, документации, миграций, стиля, тестов, 
 QEMU с запуском API и UI), Trivy всех четырёх образов и полного контейнерного
 сценария. Ошибка любого обязательного шага блокирует публикацию.
 CI использует mock-провайдеры без ключей OpenAI.
+
+Тот же Trivy 0.75.0 записывает SBOM каждого из четырёх образов в CycloneDX
+(`reports/sbom/<образ>.cdx.json`, артефакт `sbom` на 30 дней). База
+уязвимостей для этого не нужна. В каждом файле есть свойство
+`aquasecurity:trivy:ImageID` — ID проверенного образа.
 
 ## 3. Как сохраняется связь с протестированными образами
 
@@ -104,7 +125,10 @@ ai-support-agent-ui:ci-arm64  # UI, linux/arm64
 `publish` скачивает артефакт именно своего запуска, проверяет структуру
 JSON, SHA исходного commit, наличие всех четырёх образов и формат ID. Затем
 делает `docker load`, сравнивает загруженные image ID с сохранёнными
-и повторно проверяет платформу каждого образа.
+и повторно проверяет платформу каждого образа. Из артефакта `sbom` того же
+запуска берутся четыре SBOM: `ImageID` в каждом обязан совпасть с ID
+проверенного образа. Нет файла или ID чужой — job останавливается
+до первой записи в GHCR.
 Любое несовпадение останавливает доставку. В `publish` нет `docker build`.
 
 Артефакт хранится один день. Срок его хранения не ограничивает время жизни
@@ -160,13 +184,107 @@ BuildKit вместе с самим образом. Такой index тега а
 Переадресация HTTP не пересылает credentials другому адресу.
 
 Публикации main и релизов сериализованы общей группой `ghcr-delivery`.
-Это обеспечивает защиту от пересечения запусков данного workflow.
+Это обеспечивает защиту от пересечения запусков данного workflow; удаление
+в workflow очистки стоит в той же очереди.
 Registry не предоставляет здесь транзакцию сразу для двух пакетов:
 внешний пользователь с правом записи технически может поменять тег.
 Не следует вручную перезаписывать выпущенные версии; для Git-тегов
 можно настроить запрет обновления и удаления через правила репозитория.
 
-## 5. Как выпустить выбранную версию
+## 5. Подпись cosign и SBOM
+
+### Что подписывается
+
+После публикации `release_delivery.py publish` записывает отчёт
+`published-images.json`: для API и UI — digest общего index, digest
+manifest каждой архитектуры внутри него и ID проверенных образов.
+Следующий шаг `release_delivery.py sign` читает только этот отчёт:
+
+1. `cosign sign` подписывает **digest index** `ghcr.io/…@sha256:…`, а не тег.
+   Тег можно переписать, digest — нет. Если у `latest` другой digest,
+   подписывается и он; обычно он совпадает с SHA-index.
+2. `cosign attest --type cyclonedx` прикладывает SBOM к manifest каждой
+   архитектуры, на который ссылается index. Образ не пересобирается и не
+   скачивается: attestation — отдельный объект рядом с образом.
+3. `cosign verify` и `cosign verify-attestation` сразу проверяют результат.
+   Подпись принимается, только если сертификат выдан workflow `ci.yml` этого
+   репозитория для `refs/heads/main` или `refs/tags/vX.Y.Z`, издателем
+   `https://token.actions.githubusercontent.com` и для SHA проверяемого commit.
+
+Ключей и секретов нет. Право `id-token: write` есть только у `publish`:
+GitHub выдаёт заданию OIDC-токен, Fulcio по нему — сертификат на 10 минут
+с identity workflow. cosign 3.1.3 ставится из официального выпуска и
+сверяется по SHA256, записанному в workflow.
+
+Подпись хранится в том же пакете GHCR. В cosign 3 это OCI-артефакт с полем
+`subject`; если registry не поддерживает OCI Referrers API, рядом появляется
+тег `sha256-<digest образа>` со списком таких артефактов. Эти теги нельзя
+удалять вручную: без них `cosign verify` не найдёт подпись.
+
+**Публичный журнал.** Keyless-подпись Sigstore записывает сертификат
+в публичный журнал прозрачности Rekor и журнал сертификатов Fulcio.
+В сертификате видны имя репозитория `merkertg/ai-support-agent`, путь
+workflow, ref и SHA commit, даже если репозиторий и пакеты закрытые.
+Для SBOM-attestation публичный Rekor получает подпись и хеш содержимого;
+сохранит ли он сам SBOM, зависит от типа записи и лимита журнала. Если
+публиковать эти сведения нельзя, вместо keyless нужен свой ключ
+(`cosign sign --key`) или закрытый экземпляр Sigstore.
+
+### Как проверить подпись
+
+Нужен cosign 3.1.3 или новее и, для закрытого пакета, `docker login ghcr.io`.
+Digest index возьми из сводки `publish` нужного запуска: подпись проверяется
+для конкретного содержимого, а затем запускается этот же digest.
+
+```bash
+# Релиз: подставь версию и digest index из сводки publish.
+VERSION=v0.1.0
+DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+cosign verify \
+  --certificate-identity "https://github.com/merkertg/ai-support-agent/.github/workflows/ci.yml@refs/tags/$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/merkertg/ai-support-agent@$DIGEST"
+```
+
+Для образа main identity заканчивается на `@refs/heads/main`. Чтобы принять
+любую доставку этого workflow — main или стабильную версию — используй
+регулярное выражение вместо точной identity:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/merkertg/ai-support-agent/\.github/workflows/ci\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/merkertg/ai-support-agent-ui:latest
+```
+
+Проверка по тегу удобна, но cosign проверяет digest, на который тег
+указывает в момент проверки; для запуска надёжнее тот же `@sha256:…`.
+`--certificate-github-workflow-sha <полный SHA>` дополнительно привязывает
+подпись к конкретному commit. Успех — код `0` и строка
+`The following checks were performed on each of these signatures`. Подпись
+чужого workflow, ветки или fork не проходит: cosign завершится ненулевым
+кодом с сообщением об ошибке проверки.
+
+### Как получить SBOM
+
+SBOM приложен к manifest архитектуры. Его digest показан в сводке строкой
+`SBOM CycloneDX amd64 проверен: …`; его же выводит
+`docker buildx imagetools inspect ghcr.io/merkertg/ai-support-agent:<тег>`.
+Команда проверяет подпись attestation и сохраняет сам SBOM:
+
+```bash
+PLATFORM_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+cosign verify-attestation --type cyclonedx \
+  --certificate-identity-regexp '^https://github\.com/merkertg/ai-support-agent/\.github/workflows/ci\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/merkertg/ai-support-agent@$PLATFORM_DIGEST" \
+  | python3 -c 'import base64, json, sys; print(json.dumps(json.loads(base64.b64decode(json.loads(sys.stdin.readline())["payload"]))["predicate"], indent=2))' \
+  > ai-support-agent-amd64.cdx.json
+```
+
+Тот же SBOM без проверки подписи лежит в артефакте `sbom` запуска 30 дней.
+
+## 6. Как выпустить выбранную версию
 
 Эти команды — инструкция. Они не выполнялись автоматически и не означают,
 что версия `v0.1.0` уже выбрана или опубликована.
@@ -197,13 +315,15 @@ git push origin "refs/tags/$VERSION"
 
 На GitHub открой `Actions → CI and GHCR` и выбери запуск с нужным тегом.
 Все шесть заданий должны пройти, включая три запуска `portability` на Linux, macOS и Windows. В сводке `publish` должны появиться обе
-ссылки `:vX.Y.Z`, digest каждого index и digest архитектур amd64 и arm64. Успех локального теста не подтверждает
+ссылки `:vX.Y.Z`, digest каждого index и digest архитектур amd64 и arm64,
+а также раздел «Подписи и SBOM» с identity `…ci.yml@refs/tags/vX.Y.Z`.
+Успех локального теста не подтверждает
 выполнение удалённого workflow или существование пакета GHCR.
 
 Создание записи GitHub Release с описанием версии пока остаётся отдельным
 действием человека; CI публикует Docker-образы, а не выпуск на странице Releases.
 
-## 6. Как повторить частично завершённую публикацию
+## 7. Как повторить частично завершённую публикацию
 
 API может успеть опубликоваться, а запись UI — прерваться из-за сети.
 В этом случае открой исходный запуск и выбери `Re-run failed jobs`, пока
@@ -211,18 +331,21 @@ API может успеть опубликоваться, а запись UI —
 image ID: существующий идентичный API пропускается, недостающий UI
 публикуется и проверяется. Так же дописываются недостающий тег архитектуры
 или общий index. Если все ссылки уже идентичны, повтор не меняет релиз.
+Шаг подписи после повтора подписывает те же digest ещё раз: лишняя подпись
+того же workflow безвредна, а `cosign verify` снова проверяет результат.
 
 `Re-run all jobs` создаёт новые сборки. Их ID могут измениться; если часть
 старой версии уже опубликована, preflight обнаружит конфликт и остановится.
 При истёкшем артефакте или изменившихся образах следует выбрать новый номер
 версии, повторить полный CI и сохранить старые теги. Автоматической очистки
-или перезаписи уже опубликованного релиза нет.
+или перезаписи уже опубликованного релиза нет: workflow очистки удаляет
+только SHA-версии main.
 
 SHA-публикации main допускают повторную сборку того же commit и обновление
 его тегов: `sha-…-amd64`, `sha-…-arm64` и общего index. Для воспроизводимого скачивания старого
 содержимого используй digest из сводки нужного запуска.
 
-## 7. Как запустить готовую пару образов
+## 8. Как запустить готовую пару образов
 
 Оба пакета впервые публикуются с приватной видимостью GHCR. Если Docker
 ещё не авторизован для их скачивания, используй `docker login ghcr.io`;
@@ -250,14 +373,15 @@ Compose подставит `APP_IMAGE` и для миграции, и для API
 
 Для точной фиксации содержимого вместо тега можно задать две ссылки
 `ghcr.io/...@sha256:...` на digest index из одной сводки публикации;
-digest архитектуры из той же сводки фиксирует ещё и платформу. Автоматический
+digest архитектуры из той же сводки фиксирует ещё и платформу. Перед
+запуском такой digest можно проверить командой `cosign verify` из раздела 5. Автоматический
 откат схемы БД не реализован: возврат старого образа после новой миграции
 требует предварительной проверки совместимости и резервной копии данных.
 
 Публикация в GHCR сама по себе не перезапускает dev-стенд и не развёртывает
 приложение на внешнем сервере. Локальный запуск остаётся явной командой.
 
-## 8. Что проверить при ошибке
+## 9. Что проверить при ошибке
 
 | Сообщение или симптом | Действие |
 | --- | --- |
@@ -271,6 +395,44 @@ digest архитектуры из той же сводки фиксирует �
 | `не совпадает с проверенными amd64 и arm64` | Общий тег после записи указывает на другие manifest: проверить, не пишет ли в пакет кто-то ещё, и повторить failed publish |
 | Опубликована только часть тегов | Повторить failed publish с прежним артефактом, пока он хранится: совпавшие ссылки пропускаются |
 | `latest` пропущен | Для tag-запуска это ожидаемо; для main сверить актуальную вершину ветки |
+| `Нет корректного SBOM` или `SBOM … не относится к проверенному` | Проверить шаг `Generate SBOM for tested images` и артефакт `sbom` того же запуска; публикация не начиналась |
+| `Подписывать может только ci.yml из main или vX.Y.Z` | Подпись запущена не из push main или проверенного тега; так и должно быть |
+| Ошибка `cosign sign` про OIDC или `id-token` | Проверить `id-token: write` в `publish`; образы уже опубликованы, повтори failed job — publish пропустит совпавшие теги |
+| `cosign verify` завершился ошибкой | Сверить identity (`@refs/heads/main` или `@refs/tags/vX.Y.Z`), issuer и digest; подпись чужого workflow не принимается |
+
+## 10. Очистка старых SHA-версий
+
+Каждый push в `main` добавляет в каждый пакет три тега: `sha-<SHA>`,
+`sha-<SHA>-amd64` и `sha-<SHA>-arm64`, а подписи и SBOM — ещё несколько
+версий. Workflow `.github/workflows/ghcr-cleanup.yml` по воскресеньям
+составляет план удаления SHA-версий, которые не менялись дольше 30 дней.
+
+- Не удаляются версии с `latest`, `vX.Y.Z`, `vX.Y.Z-amd64/-arm64` или любым
+  другим не-SHA тегом, а также всё, на что они ссылаются: manifest
+  архитектур, attestation BuildKit, подписи и SBOM-attestation.
+- Вместе со старым SHA-index удаляются его manifest и подписи, если на них
+  не ссылается ничего сохраняемое. Сохранённый index без тега тоже сохраняет
+  свои дочерние manifest; OCI-артефакт сохраняет исходный образ `subject`.
+- Нечитаемый manifest (включая HTTP 404) или неизвестный формат останавливает
+  план. Сначала проверяются оба пакета, перед первой DELETE повторно
+  сверяются их списки версий, а перед каждой DELETE — текущие теги,
+  digest и дата удаляемой версии. Изменение требует нового запуска.
+- По умолчанию это **dry-run**: план виден в сводке и артефакте
+  `ghcr-cleanup-plan`, ничего не удаляется. Удаление — ручной запуск
+  `Actions → Clean up old GHCR SHA images → Run workflow` с отметкой
+  `delete` или переменная репозитория `GHCR_CLEANUP_DELETE=true` для
+  расписания. Срок меняет поле `days` или переменная `GHCR_CLEANUP_DAYS`.
+- Удалённую версию GitHub позволяет восстановить в настройках пакета
+  в течение 30 дней.
+
+Очистка и публикация стоят в общей очереди `ghcr-delivery`. Между GET и
+DELETE API GitHub не предоставляет транзакцию: внешние процессы с правом
+записи в пакеты нужно остановить на время удаления. Ошибка после первой
+DELETE не откатывает предыдущие удаления. Очистка затрагивает только GHCR;
+базы данных и локальные Docker-тома приложения она не открывает.
+
+Логика отбора — в `scripts/ghcr_cleanup.py`; подробности и права — в
+[CI_CD.md](CI_CD.md).
 
 Текущие фактические результаты проверок и статус удалённого запуска
 фиксируются отдельно в [VERIFICATION.md](VERIFICATION.md). Документация
@@ -280,3 +442,6 @@ digest архитектуры из той же сводки фиксирует �
 и [Docker Registry HTTP API V2](https://distribution.github.io/distribution/spec/api/).
 Формат containerd разобран в [Docker Desktop image store](https://docs.docker.com/desktop/features/containerd/),
 структура индекса — в [OCI Image Index Specification](https://github.com/opencontainers/image-spec/blob/main/image-index.md).
+Подпись и проверка: [Sigstore cosign](https://docs.sigstore.dev/cosign/verifying/verify/)
+и [OIDC в GitHub Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect);
+удаление версий пакета: [Deleting and restoring a package](https://docs.github.com/en/packages/learn-github-packages/deleting-and-restoring-a-package).

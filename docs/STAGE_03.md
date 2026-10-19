@@ -9,6 +9,13 @@ PostgreSQL и возвращает результат с присвоенным 
 [журнале разработки](DEVELOPMENT_LOG.md). Устройство базы, миграций и томов подробно разобрано в
 [этапе 02](STAGE_02.md), а весь pipeline — в [инструкции CI/CD](CI_CD.md).
 
+> **Токены сотрудников (после этапа 10).** Сейчас каждый запрос к `/api/*`
+> требует заголовок `Authorization: Bearer <токен>`. Выдай токен по
+> [быстрому запуску](instructions/quickstart.md#issue-the-first-staff-token)
+> и добавляй к curl `--header "Authorization: Bearer $API_TOKEN"`; smoke-тест
+> читает токен из `API_TOKEN`. Примеры ниже записаны так, как выглядели на
+> этом этапе. Подробности — [этап 10, раздел 9](STAGE_10.md#9-аутентификация-роли-и-лимит-изменений).
+
 > **Windows.** Команды в этом руководстве написаны для Bash (Linux, macOS).
 > В Windows выполняй их в Git Bash или WSL 2 либо используй аналоги для PowerShell
 > из страницы [Windows и PowerShell](instructions/windows.md).

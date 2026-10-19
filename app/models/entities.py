@@ -1,6 +1,6 @@
 """Схема поддержки: клиенты, лицензии, обращения и история работы агента.
 
-Эти классы описывают данные. Они не реализуют API, авторизацию, запуск LLM
+Эти классы описывают данные. Они не реализуют API, проверку токенов, запуск LLM
 или поиск: тексты и векторы статей хранит Qdrant, здесь — только реестр.
 Реальную схему PostgreSQL изменяет только Alembic.
 """
@@ -27,10 +27,12 @@ from app.db.base import Base
 
 
 class User(Base):
-    """Профиль сотрудника поддержки без пароля и механизма авторизации."""
+    """Сотрудник поддержки; доступ к API даёт API-токен, пароля нет."""
 
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('operator', 'admin')", name="role"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('operator', 'reviewer', 'admin')", name="role"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
@@ -40,6 +42,38 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ApiToken(Base):
+    """API-токен сотрудника: хранится только SHA-256, сам токен не сохраняется.
+
+    Токен выдаётся один раз и действует до expires_at или до отзыва
+    (revoked_at). Удаление сотрудника удаляет и его токены.
+    """
+
+    __tablename__ = "api_tokens"
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="expiry"),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at", name="revocation"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Подпись токена для списка: «ci-smoke», «ноутбук Анны» и т. п.
+    name: Mapped[str] = mapped_column(String(100))
+    # Шестнадцатеричный SHA-256: поиск по индексу без хранения секрета.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # Первые символы токена помогают узнать его в списке, не раскрывая секрет.
+    token_prefix: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Customer(Base):

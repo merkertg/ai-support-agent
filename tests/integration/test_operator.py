@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def client(migrated_engine):
+def client(migrated_engine, staff_headers):
     """Применить миграции и дать каждому запросу собственную тестовую сессию."""
 
     def dependency():
@@ -25,7 +25,7 @@ def client(migrated_engine):
     previous = app.dependency_overrides.copy()
     app.dependency_overrides[get_api_session] = dependency
     try:
-        with TestClient(app) as value:
+        with TestClient(app, headers=staff_headers) as value:
             yield value
     finally:
         app.dependency_overrides.clear()

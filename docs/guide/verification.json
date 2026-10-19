@@ -1,83 +1,81 @@
 {
   "checked_at": "2026-10-19",
-  "base_commit": "c8887bc",
+  "base_commit": "8d3f1d0",
   "tests": {
-    "total": 964,
-    "unit": 832,
-    "integration": 132,
-    "smoke_cli": 89,
+    "total": 1186,
+    "unit": 1033,
+    "integration": 153,
+    "smoke_cli": 102,
     "skipped": 0
   },
   "checks": [
     {
       "name": "Код и комментарии",
-      "result": "Ruff без замечаний; 120 файлов Python; 1303 функции/класса с docstrings."
+      "result": "Ruff без замечаний; 131 файл Python, 1569 функций/классов с docstrings."
     },
     {
       "name": "Инструкции",
-      "result": "26 Markdown: ссылки, 182 Bash и 26 PowerShell (pwsh 7.4), JSON; без путей этого Mac."
+      "result": "26 Markdown, ссылки, 190 Bash, JSON: PASS. 29 PowerShell-блоков проверяет CI; локально pwsh отсутствует."
     },
     {
       "name": "Покрытие",
-      "result": "90.95% при пороге 85%, с дочерними процессами; прежний Linux-замер 90.19%."
+      "result": "92.23% строк и ветвей вместе при пороге 85%; CLI subprocess учтены; XML/JSON/HTML."
     },
     {
-      "name": "ОС и архитектуры",
-      "result": "CI: Linux, macOS, Windows и запуск API/UI; arm64 под QEMU, публикуется вместе с amd64."
+      "name": "CI и платформы",
+      "result": "3 workflow: actionlint PASS. 6 jobs CI, portability Linux/macOS/Windows; удалённый запуск не подтверждён."
     },
     {
-      "name": "Workflow",
-      "result": "Два workflow прошли actionlint; 6 jobs основного CI, portability на 3 ОС. Удалённый результат не подтверждён."
+      "name": "Токены и роли",
+      "result": "SHA-256 токенов; operator/reviewer/admin; 401/403/429; автор решения из токена, конкурентные PG-проверки."
     },
     {
       "name": "Зависимости",
-      "result": "Linux: 88 runtime-пакетов API/UI, 0 известных уязвимостей, 0 пропусков; 99 пакетов lock старше 14 дней."
-    },
-    {
-      "name": "uv 0.12.23",
-      "result": "Lock читается без изменений; API/UI устанавливаются раздельно; Docker-сборки прошли."
-    },
-    {
-      "name": "Брошенные running",
-      "result": "Порог 180 с, проход 30 с; PostgreSQL-гонки, поздний worker и сохранность completed проверены."
+      "result": "Linux audit: 88 пакетов API/UI, 0 известных уязвимостей и пропусков. 99 пакетов lock старше 14 дней."
     },
     {
       "name": "Оценки",
-      "result": "Recall@5 0.9808; MRR@5 1.00; no-hit 1.00; 0 нарушений области; агент 12/12."
+      "result": "Recall@5 0.9808; MRR@5/no-hit 1.00; scope 0; 12/12 сценариев агента; реальная модель не вызывалась."
     },
     {
-      "name": "Образы и Trivy",
-      "result": "API/UI amd64 и arm64: UID 10001, без devtools; 0 исправимых HIGH/CRITICAL."
+      "name": "Образы и SBOM",
+      "result": "API/UI для amd64/arm64: сборка, UID, health, Trivy PASS; 4 CycloneDX совпали с image ID после save/load."
     },
     {
-      "name": "Сквозной сценарий",
-      "result": "Миграции, HTTP review/resume, сохранность томов, UI AppTest, повтор демо и журнал без ключей: PASS."
+      "name": "Контейнерный CI",
+      "result": "Миграции, токены, review/resume, тома, UI AppTest, demo approve/reject и повтор, журнал без секретов: PASS."
     },
     {
-      "name": "Передача API/UI",
-      "result": "4 образа: save/load, ID и платформы совпали. Теги -amd64/-arm64 и общий index проверены на registry."
+      "name": "Локальный запуск",
+      "result": "Настоящие Uvicorn/Streamlit на macOS: PASS. Нативные Windows/Linux проверяет матрица GitHub."
+    },
+    {
+      "name": "Очистка и подпись",
+      "result": "230 тестов delivery/cleanup PASS; очистка dry-run. Публичная подпись выключена до GHCR_PUBLIC_SIGNING=true."
     },
     {
       "name": "Development",
-      "result": "Пересобран без удаления томов: 14 таблиц и 27 точек Qdrant совпали; API/UI healthy."
+      "result": "Обновлён до 0005: 15 таблиц; прежние данные и 27 точек Qdrant сохранены; API/UI healthy, без токена 401."
     }
   ],
   "remote_ci": {
-    "status": "failed",
-    "commit": "571538c9852133a8f5288565a86cca9393cce1fb",
-    "detail": "571538c: Python checks упал на покрытии 77.13%. Исправлено; новые запуски и публикация amd64/arm64 в GHCR не подтверждены."
+    "status": "not_verified",
+    "commit": null,
+    "previous_user_confirmed_commit": "571538c9852133a8f5288565a86cca9393cce1fb",
+    "detail": "Новый удалённый запуск не подтверждён: API закрытого репозитория вернул 404. Пользователь ранее сообщил о 5 зелёных jobs/API+UI для 571538c; в истории также есть его раннее падение покрытия. Для нового SHA проверь 6 jobs и 3 ОС portability, оба пакета amd64/arm64. Подпись выключена."
   },
   "changes": [
-    "API и UI публикуются для amd64 и arm64: теги -amd64/-arm64 и общий index, Docker сам выбирает архитектуру.",
-    "Версия проверяется до записи по шести ссылкам; SHA-тег main пересоздаётся при повторной сборке.",
-    "Trivy сканирует четыре образа; arm64 собирается и запускается под QEMU до сканирования.",
-    "Инструкции для Windows и проверка PowerShell-примеров; задание portability на Linux, macOS и Windows.",
-    "Исправлен порог покрытия в CI: генератор PDF больше не попадает в отчёт из дочернего процесса."
+    "Завершены токены сотрудников, роли и лимит изменений; автор решения берётся из проверенного токена.",
+    "FOR SHARE защищает решение от одновременного понижения роли; CLI нормализует email.",
+    "Очистка GHCR сохраняет все нужные связи, останавливается при 404 и повторно проверяет версии перед удалением.",
+    "Четыре архитектурных образа, SBOM и полный аутентифицированный Docker-сценарий проверены.",
+    "Публичная подпись выключена по выбору пользователя; стенд обновлён, одобренный локальный администратор создан."
   ],
   "remaining": [
-    "Подтвердить новый Actions: 6 зелёных заданий и index amd64/arm64 обоих пакетов GHCR; проверить первый PR обновления.",
-    "Реальные OpenAI-запросы, качество, стоимость и задержка не измерялись; по выбору пользователя остаётся mock.",
-    "Вход и роли сотрудников не реализованы: reviewer_id - учебная отметка. Настоящая доставка и внешний deploy вне текущей границы GHCR."
+    "Подтвердить новый GitHub Actions: 6 jobs, 3 ОС portability, оба пакета amd64/arm64 и SBOM; первый dry-run очистки и PR зависимостей.",
+    "SSO, общий лимит нескольких worker и внешний TLS остаются отдельным расширением; локальный вход администратора уже подготовлен.",
+    "Публичная подпись выключена; GHCR_PUBLIC_SIGNING=true включает её и раскрытие metadata в Rekor.",
+    "Mock остаётся по выбору пользователя. Реальная модель, внешняя доставка и серверный deploy не проверялись и не настроены."
   ],
   "evaluations": {
     "questions": 32,
@@ -89,14 +87,21 @@
     "agent_total": 12
   },
   "coverage": {
-    "combined_percent": 90.19,
-    "line_percent": 92.18,
-    "branch_percent": 82.13,
+    "combined_percent": 92.23,
+    "line_percent": 93.91,
+    "branch_percent": 85.69,
     "minimum_combined_percent": 85,
-    "covered_lines": 4137,
-    "statements": 4488,
-    "covered_branches": 910,
-    "branches": 1108,
+    "covered_lines": 5131,
+    "statements": 5464,
+    "covered_branches": 1198,
+    "branches": 1398,
     "subprocess": true
+  },
+  "bootstrap": {
+    "admin_created": true,
+    "email": "admin@example.com",
+    "credential_file": ".env.admin-token",
+    "credential_tracked": false,
+    "ui_authenticated": true
   }
 }

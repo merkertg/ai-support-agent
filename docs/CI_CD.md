@@ -1,5 +1,14 @@
 # CI/CD: проверки проекта и публикация API/UI образов
 
+> **Текущая настройка подписи:** по выбору пользователя от 19.10.2026
+> публичная keyless-подпись и SBOM attestations подготовлены, но **выключены**.
+> Для включения владелец задаёт `GHCR_PUBLIC_SIGNING=true` в GitHub → Settings →
+> Secrets and variables → Actions → Variables. Это разрешает публикацию metadata
+> в Rekor. Без этой переменной установка cosign и шаг `sign` пропускаются;
+> сборки, проверка SBOM, артефакт `sbom` и публикация API/UI в GHCR работают.
+> Разделы о cosign ниже описывают поведение после явного включения.
+
+
 Эта инструкция объясняет, что запускает GitHub после обновления проекта,
 как устроены проверки и как получить готовый Docker-образ.
 
@@ -8,8 +17,10 @@
 именно эти два образа в GitHub Container Registry (GHCR):
 `ghcr.io/merkertg/ai-support-agent` и `ghcr.io/merkertg/ai-support-agent-ui`.
 Каждый публикуется для `linux/amd64` и `linux/arm64` под одним тегом.
-Версию выбирает человек; CI не создаёт теги автоматически.
-[Подробная процедура выпуска и восстановления публикации](RELEASES.md).
+Общий тег подписывается cosign keyless, к образу каждой архитектуры
+прикладывается SBOM CycloneDX. Версию выбирает человек; CI не создаёт теги
+автоматически. Старые SHA-версии main убирает отдельный workflow очистки.
+[Подробная процедура выпуска, проверки подписи и восстановления публикации](RELEASES.md).
 
 CD в этом проекте означает **Continuous Delivery — доставку готового образа
 в реестр**. Развёртывание на сервере, покупка хостинга и запуск приложения
@@ -72,6 +83,7 @@ Pipeline — последовательность автоматических �
 | Создание или обновление PR в `main` | Да | Да | Нет |
 | Ручной запуск `Run workflow` | Да | Да | Нет |
 | Dispatch для ветки обновления зависимостей | Да | Да | Нет |
+| Расписание очистки GHCR (воскресенье) | Нет | Нет | Нет; план удаления старых SHA-версий, удаление — только по явному разрешению |
 | `push` в другую ветку без PR в `main` | Нет | Нет | Нет |
 | Локальный `git commit` без `push` | Нет | Нет | Нет |
 
@@ -99,10 +111,11 @@ security: lock-файл → аудит известных уязвимостей
 portability: Linux, macOS, Windows → uv.lock → docs → Ruff → unit-тесты → запуск API/UI
         │ только при успехе всех трёх заданий
         ▼
-container: API/UI → arm64 под QEMU → Trivy (4 образа) → Compose/HTTP → тома → UI/демо → журнал → архив
+container: API/UI → arm64 под QEMU → SBOM и Trivy (4 образа) → Compose/HTTP → тома → UI/демо → журнал → архив
         │ только при успехе и только push main либо проверенного vX.Y.Z
         ▼
-publish: проверить commit и 4 ID → GHCR preflight → amd64 и arm64 → общий index
+publish: commit, 4 ID и SBOM → GHCR preflight → amd64 и arm64 → общий index
+         → cosign: подпись digest index, SBOM-attestation, verify
 ```
 
 На PR и при ручном запуске цепочка заканчивается после проверки контейнера.
@@ -258,9 +271,9 @@ uv tool run --python 3.12 --from pip-audit==2.10.1 pip-audit \
 
 ### Задание `container`: проверить собранное приложение
 
-Это задание содержит `needs: [checks, security]`. GitHub запускает его после
-успешного завершения обеих проверок; ошибка любой из них блокирует сборку
-и последующую публикацию.
+Это задание содержит `needs: [checks, security, portability]`. GitHub запускает
+его после успешного завершения проверок кода, аудита зависимостей и матрицы
+Linux/macOS/Windows; ошибка любой из них блокирует сборку и публикацию.
 
 Основные действия:
 
@@ -274,20 +287,25 @@ uv tool run --python 3.12 --from pip-audit==2.10.1 pip-audit \
    затем миграции, затем API из этого образа; `--no-build` запрещает пересборку.
 3. Проиндексировать базу знаний: `python -m app.knowledge.ingest` внутри `api`.
    Отчёт должен содержать проиндексированные статьи и не содержать удалённых.
-4. Дождаться healthcheck и выполнить `scripts/smoke_test.py --check-review`.
+4. Выдать суточный токен администратора командой `python -m app.tokens issue`
+   внутри `api` (первого администратора иначе не создать: без токена `/api/*`
+   закрыт). Токен маскируется (`::add-mask::`) и попадает в `API_TOKEN` через
+   `$GITHUB_ENV`; smoke, демо и AppTest читают его оттуда, а не из аргументов.
+   Дождаться healthcheck и выполнить `scripts/smoke_test.py --check-review`.
    Вывод сохраняется в `smoke.log`: из него следующий шаг берёт ID запуска агента.
    Затем `--check-agent` оставляет ещё один запуск в ожидании решения (`pending.log`).
 5. Записать вымышленные demo-данные через `python -m app.db.demo seed`,
    прочитать созданный запуск агента `GET /api/agent-runs/{id}` и выдачу
-   поиска для известного запроса. Сохранить три JSON-снимка, выполнить
+   поиска для известного запроса (curl с заголовком `Authorization`).
+   Сохранить три JSON-снимка, выполнить
    `docker compose down` **без `--volumes`**, снова запустить сервисы и прочитать
    то же самое. `cmp` проверяет идентичность снимков: записи PostgreSQL и индекс
    Qdrant должны пережить удаление контейнеров благодаря томам. Повторный seed
    между снимками запрещён: он мог бы скрыть потерю данных. Повторная индексация
    после пересоздания обязана сообщить `indexed: []` и `removed: []`.
    `--review-run` продолжает отложенный граф LangGraph уже в новых контейнерах:
-   ожидание решения сотрудника переживает пересоздание. Затем полный smoke
-   `--check-review` выполняется ещё раз.
+   ожидание решения сотрудника переживает пересоздание, а токен из PostgreSQL
+   по-прежнему действует. Затем полный smoke `--check-review` выполняется ещё раз.
 6. Запустить сервис `ui` (этапы 08 и 10): Compose ждёт healthy API, затем
    healthcheck Streamlit `/_stcore/health`. `scripts/demo_scenario.py
    --verify-review` должен оставить основное предложение `pending` /
@@ -295,8 +313,9 @@ uv tool run --python 3.12 --from pip-audit==2.10.1 pip-audit \
    одобрение (одно сообщение, `delivered`) и отклонение (нет сообщений,
    `rejected`). Повторный запуск обязан вывести байт-в-байт тот же JSON:
    сценарий только читает существующие записи. Наконец, внутри контейнера
-   `ui` настоящая страница отрисовывается Streamlit AppTest против API
-   и не должна содержать исключений и ошибок.
+   `ui` настоящая страница отрисовывается Streamlit AppTest против API:
+   без токена она не показывает данных, после ввода `API_TOKEN` в боковую
+   панель — показывает метрики и не содержит исключений и ошибок.
 7. Просканировать Trivy 0.75.0 все четыре образа: API и UI для amd64 и arm64.
    Сканер запускается образом, закреплённым по digest, а не через
    `aquasecurity/trivy-action`: в марте 2026 теги этого действия и образы
@@ -306,9 +325,18 @@ uv tool run --python 3.12 --from pip-audit==2.10.1 pip-audit \
    включая уязвимости без исправления, сохраняется артефактом `image-scan`.
    Уязвимости базового Debian без исправления не блокируют сборку: их нечем
    исправить, пока дистрибутив не выпустит обновление.
+   Перед сканированием тот же Trivy записывает SBOM каждого из четырёх образов
+   в CycloneDX: `reports/sbom/ai-support-agent-ci.cdx.json`,
+   `…-ci-arm64.cdx.json` и то же для UI. База уязвимостей для SBOM не нужна.
+   Файлы сохраняются артефактом `sbom` на 30 дней, в том числе при найденной
+   уязвимости. Свойство `aquasecurity:trivy:ImageID` в каждом SBOM равно ID
+   образа: `publish` по нему убеждается, что SBOM описывает именно
+   опубликованный образ.
 8. Проверить журнал API после smoke и демо: в нём есть JSON-строки запросов
-   и нет ключей лицензий `SMOKE-…` и `DEMO-STAGE10…`, хотя smoke и демо
-   передавали их в теле и в фильтре `?license_key=`.
+   с `user_id` и события `auth_failed`, но нет ключей лицензий `SMOKE-…`
+   и `DEMO-STAGE10…`, хотя smoke и демо передавали их в теле и в фильтре
+   `?license_key=`, и нет ни одной строки вида токена `asa_…` (сама строка
+   при совпадении не печатается).
 9. Для push в `main` или проверенного `vX.Y.Z` сохранить четыре проверенных
    образа (API и UI для amd64 и arm64) одним артефактом `tested-docker-images`,
    включая полный SHA commit и все image ID. Перед экспортом проверяется
@@ -372,13 +400,18 @@ GET проверяет, что обращение не изменилось. В�
 Compose-проекту и удаляются с его томом после задания.
 
 С этапа 07 CI передаёт `--check-review`. Он включает `--check-agent`, затем
-требует в OpenAPI `POST /api/users`, `GET /api/agent-runs/{id}/workflow` и
+требует в OpenAPI `POST /api/users`, `POST /api/users/{id}/tokens`,
+`DELETE /api/tokens/{id}`, `GET /api/agent-runs/{id}/workflow` и
 `POST /api/suggestions/{id}/review`, проверяет, что граф стоит на
-`human_review`, создаёт учебного сотрудника и одобряет предложение
-с отредактированным текстом. Ответ должен показать `approved`, сообщение
-автора `operator` от этого сотрудника с тем же текстом, `waiting_customer`
-и итог графа `delivered`; повторное решение обязано получить `409`.
-`--review-run RUN_ID` выполняет те же проверки для уже сохранённого запуска.
+`human_review`, и проверяет права: решение без токена — `401`; созданный
+учебный `operator` с суточным токеном — `403`; после отзыва его токена — `401`;
+граф всё это время ждёт. Только затем предложение одобряется от имени
+сотрудника `API_TOKEN` (нужна роль `admin`) с отредактированным текстом.
+Ответ должен показать `approved`, автора решения и сообщения — владельца
+токена, тот же текст, `waiting_customer` и итог графа `delivered`; повторное
+решение обязано получить `409`. `--review-run RUN_ID` одобряет уже
+сохранённый запуск и требует лишь роли `reviewer`. Каждый режим с `/api/*`
+начинается с проверки `401` без токена и `GET /api/auth/me`.
 
 С этапа 06 `--check-agent` включает также `--check-knowledge`. Этот режим только
 читает: требует в OpenAPI `GET /api/knowledge/status` и `POST /api/knowledge/search`,
@@ -471,6 +504,36 @@ digest архитектуры фиксирует и её. Различай SHA �
 может изменить image ID и потребовать новой версии. Полная процедура
 выбора тега, повторов и запуска пары образов описана в [RELEASES.md](RELEASES.md).
 
+#### Подпись cosign и SBOM-attestation
+
+До первой записи `publish` проверяет четыре SBOM из артефакта `sbom`: файл
+есть, это CycloneDX, `ImageID` совпадает с ID проверенного образа. Затем
+ставит cosign 3.1.3 из официального выпуска со сверкой SHA256 — без cosign
+job останавливается до публикации. После публикации отчёт
+`published-images.json` содержит digest каждого index и manifest архитектур.
+Шаг `Sign indexes and attach SBOM attestations` выполняет
+`release_delivery.py sign`:
+
+1. `cosign sign --yes ghcr.io/…@sha256:<index>` для API и UI — подписывается
+   digest, а не тег. Если у `latest` digest другой, подписывается и он.
+2. `cosign attest --type cyclonedx` прикладывает SBOM к manifest каждой
+   архитектуры из этого index. Образы не пересобираются.
+3. `cosign verify` и `cosign verify-attestation` с identity
+   `https://github.com/merkertg/ai-support-agent/.github/workflows/ci.yml@<ref>`,
+   издателем `https://token.actions.githubusercontent.com` и
+   `--certificate-github-workflow-sha` проверяемого commit. Ошибка — красный job.
+
+Подпись keyless: ключей и секретов нет. `id-token: write` разрешён только
+`publish`; GitHub выдаёт OIDC-токен, Fulcio — сертификат на 10 минут.
+Подпись и сертификат записываются в публичный журнал Sigstore (Rekor):
+имя закрытого репозитория, путь workflow, ref и SHA commit станут видны
+публично. В сводке появляется раздел «Подписи и SBOM». Команды проверки
+для пользователя образа — в [RELEASES.md](RELEASES.md).
+
+cosign 3 хранит подписи OCI-артефактами в том же пакете GHCR. Если registry
+не поддерживает OCI Referrers API, добавляется тег `sha256-<digest образа>`
+со списком подписей. Такие теги нельзя удалять вручную.
+
 Публикация доставляет образы в реестр. Автоматическое обновление внешнего
 сервера или локального dev-стенда в этот workflow не входит.
 
@@ -480,8 +543,9 @@ digest архитектуры фиксирует и её. Различай SHA �
 | --- | --- |
 | `permissions: contents: read` | Разрешает заданиям читать код репозитория. |
 | `packages: write` только в `publish` | Разрешает этому заданию публиковать образ в GHCR. |
+| `id-token: write` только в `publish` | OIDC-токен GitHub для keyless-подписи cosign; остальные задания его не получают. |
 | `needs: delivery` | Проверки кода и аудита ждут корректную цель запуска. |
-| `needs: [checks, security]` | Контейнер ждёт успешные проверки кода и аудит. |
+| `needs: [checks, security, portability]` | Контейнер ждёт успешные проверки кода, аудит и матрицу Linux/macOS/Windows. |
 | `needs: container` | Не позволяет публиковать непроверенный контейнер. |
 | `if` в `publish` | Допускает только push main или проверенного version-тега; PR и dispatch пропускаются. |
 | `concurrency` | Отменяет устаревшие проверки одного PR и ставит публикации в общую очередь. Все push в `main` сохраняют свои проверки. |
@@ -499,7 +563,8 @@ Ruff не скрывает результат форматирования и т
 Обновлять SHA нужно осознанно вместе с проверкой новой версии.
 
 Задания работают на `ubuntu-24.04`. `checks` ограничен 10 минутами,
-`container` и `publish` — 15 минутами каждый.
+`container` и `publish` — 30 минутами каждый: сборка arm64 под QEMU,
+четыре образа, подписи и SBOM занимают время.
 
 Для PR новая версия изменений отменяет старый запуск этого же PR.
 Каждый `push` в `main` получает отдельную группу и проходит свои проверки;
@@ -531,7 +596,9 @@ Ruff не скрывает результат форматирования и т
 | `app/db/demo.py` | Явная запись и чтение demo-данных для проверки постоянного тома. |
 | `.dockerignore` | Исключает локальное окружение, Git и ненужные файлы из контекста Docker. |
 | `scripts/release_delivery.py` | Строгая версия, main ancestry, оба tested image ID и доставка без пересборки. |
-| `docs/RELEASES.md` | Выбор версии, восстановление частичного push и запуск обоих пакетов. |
+| `docs/RELEASES.md` | Выбор версии, проверка подписи и SBOM, восстановление частичного push и запуск обоих пакетов. |
+| `.github/workflows/ghcr-cleanup.yml` | План (dry-run) и, по явному разрешению, удаление старых SHA-версий GHCR. |
+| `scripts/ghcr_cleanup.py` | Отбор SHA-версий старше срока с защитой latest, релизов и всего, на что они ссылаются. |
 | `scripts/smoke_test.py` | Проверяет API по настоящему HTTP и возвращает ошибку, если контракт нарушен. |
 | `tests/` | Автоматические Python-тесты проекта. |
 | `pyproject.toml` | Зависимости, требования к Python и настройки инструментов. |
@@ -687,6 +754,7 @@ git branch --show-current
 | `evaluation-report` | После оценок, если отчёт создан; включая нарушение порога | `reports/evaluations.json` с метриками, каждым вопросом и сценарием | 7 дней |
 | `dependency-audit` | Шаг запускается всегда, включая найденную уязвимость; при ранней ошибке файлы могут отсутствовать | `runtime-requirements.txt` с hashes и `pip-audit.json`, когда он создан | 7 дней |
 | `image-scan` | После сканирования, включая найденную уязвимость | `reports/image-scan/*.json` — отчёт Trivy по образам API и UI | 7 дней |
+| `sbom` | После сборки четырёх образов, включая найденную уязвимость | `reports/sbom/*.cdx.json` — SBOM CycloneDX API и UI для amd64 и arm64 | 30 дней |
 | `tested-docker-images` | После успешного container, на push main или version-тега | `tested-images.tar` с API/UI и `tested-images.json` с commit и обоими ID | 1 день |
 
 Архив образа передаёт сборку между заданиями; его также можно скачать для
@@ -755,6 +823,8 @@ docker version
 cp -n .env.example .env
 docker compose up --build --detach --wait api
 docker compose exec -T api python -m app.knowledge.ingest
+export API_TOKEN="$(docker compose exec -T api python -m app.tokens issue \
+  --email admin@example.com --name 'Administrator' --role admin)"
 uv run --locked python scripts/smoke_test.py \
   --base-url http://127.0.0.1:8001 --timeout 30 --check-review
 docker compose exec -T api python -m alembic check
@@ -860,6 +930,10 @@ Docker сам скачивает подходящую архитектуру, п
 | `denied`, `unauthorized`, `permission_denied` в `publish` | Проверь `packages: write`, доступ репозитория к пакету и ограничивающие настройки организации. Не вставляй PAT в код для обхода ошибки. |
 | `publish` имеет статус `Skipped` | Для PR и ручного запуска это ожидаемо; для push в `main` проверь, прошли ли предыдущие задания. |
 | `docker pull` локально сообщает об отсутствии доступа | Убедись, что пакет уже опубликован, проверь его видимость и локальный `docker login` с правом `read:packages`. |
+| `Нет корректного SBOM` / `SBOM … не относится к проверенному` в `publish` | Проверь шаг `Generate SBOM for tested images` и артефакт `sbom` этого запуска. Публикация не начиналась. |
+| `cosign sign` не получил OIDC-токен | Проверь `id-token: write` у `publish`. Образы уже в GHCR: `Re-run failed jobs` пропустит совпавшие теги и повторит подпись. |
+| Ошибка `cosign verify` в `publish` | Подпись не совпала с identity `ci.yml@<ref>`, issuer или SHA commit; не публикуй такой digest как проверенный. |
+| Очистка GHCR: HTTP 403 | У репозитория нет роли Admin в `Manage Actions access` пакета; job остановился до удаления. |
 | `port is already allocated` | Порт занят другим контейнером или Uvicorn; останови старый процесс либо выбери 8001. |
 | `Conflict. The container name ... is already in use` | Проверь `docker ps -a`; удали старый учебный контейнер с этим именем или выбери другое имя. |
 | `Cannot connect to the Docker daemon` | Запусти Docker Desktop и дождись готовности Docker. |
@@ -980,8 +1054,19 @@ Lock-файл и синхронизация окружения:
 Проверка workflow и зафиксированный бинарный выпуск:
 [actionlint v1.7.12](https://github.com/rhysd/actionlint/releases/tag/v1.7.12).
 
+Подпись, attestation и проверка:
+[cosign v3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3),
+[Verifying signatures](https://docs.sigstore.dev/cosign/verifying/verify/),
+[OpenID Connect в GitHub Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect).
 
-## 15. Как обновляются зависимости
+SBOM: [Trivy SBOM](https://trivy.dev/latest/docs/supply-chain/sbom/) и
+[CycloneDX](https://cyclonedx.org/specification/overview/).
+
+Удаление и восстановление версий пакета:
+[Deleting and restoring a package](https://docs.github.com/en/packages/learn-github-packages/deleting-and-restoring-a-package).
+
+
+## 16. Как обновляются зависимости
 
 Отдельный workflow `.github/workflows/dependency-updates.yml` по расписанию
 или вручную готовит обновление Python-зависимостей. Выпуски моложе 14 дней
@@ -996,3 +1081,77 @@ Lock-файл и синхронизация окружения:
 После одобрения и merge в `main` запускается обычный main CI/CD.
 Подробности прав, ветки и ручного повторения находятся в
 [DEPENDENCY_UPDATES.md](DEPENDENCY_UPDATES.md).
+
+## 17. Как очищаются старые SHA-образы в GHCR
+
+Каждый push в `main` добавляет в каждый пакет три тега (`sha-<SHA>`,
+`sha-<SHA>-amd64`, `sha-<SHA>-arm64`), а подписи и SBOM — ещё несколько
+версий. Без очистки пакеты растут бесконечно. Workflow
+`.github/workflows/ghcr-cleanup.yml` запускается по воскресеньям в 04:23 UTC
+и вручную (`Actions → Clean up old GHCR SHA images → Run workflow`).
+
+```text
+plan (packages: read): версии обоих пакетов → manifest и подписи → план, сводка, артефакт
+        │ только при отметке delete или GHCR_CLEANUP_DELETE=true
+        ▼
+delete (packages: write, очередь ghcr-delivery): план заново → удаление по одной версии
+```
+
+Как `scripts/ghcr_cleanup.py` выбирает версии:
+
+1. Через REST API GitHub читает все версии пакета: digest, теги, даты.
+2. Версия со всеми тегами вида `sha-<40 hex>`, `…-amd64`, `…-arm64` — SHA-версия.
+   Она старая, если не менялась дольше срока (по умолчанию 30 дней;
+   добавление тега обновляет дату). Версия с `latest`, `vX.Y.Z`, `vX.Y.Z-amd64`
+   или любым другим тегом защищена.
+3. От защищённых и свежих SHA-версий скрипт идёт по ссылкам: index → manifest
+   архитектур и attestation BuildKit, образ → подписи и SBOM-attestation
+   (теги `sha256-<hex>`, `.sig`, `.att` и поле `subject`). Всё найденное
+   сохраняется. Сохраняются также связи всех версий, не относящихся к старым
+   SHA: оставшийся index без тега не потеряет общий дочерний manifest.
+   Сохраняемый OCI-артефакт сохраняет свой исходный образ из `subject`.
+4. Удаляются старые SHA-версии и то, что достижимо только из них. Родитель
+   index удаляется раньше дочернего manifest. Версии без тегов и связей
+   скрипт не трогает. HTTP 404 перечисленного или связанного manifest,
+   неизвестный формат, неверный index/subject и дубликаты ID/digest
+   останавливают весь план: отсутствие сведений не доказывает отсутствие связей.
+5. Сначала полностью строятся планы **обоих** пакетов. Перед первой DELETE
+   повторно читаются полные списки версий API и UI; любое изменение требует
+   нового запуска. Перед каждой DELETE дополнительно перечитывается её version ID
+   и сравниваются digest, теги и дата со снимком. Изменённая версия не удаляется.
+
+Удаления по умолчанию нет: job `plan` только показывает план в сводке
+и в артефакте `ghcr-cleanup-plan` (30 дней). Чтобы удалить:
+
+- разово — ручной запуск с отметкой `delete`;
+- по расписанию — переменная репозитория `GHCR_CLEANUP_DELETE=true`
+  (`Settings → Secrets and variables → Actions → Variables`).
+
+Срок задаёт поле `days` ручного запуска или переменная `GHCR_CLEANUP_DAYS`;
+допустимо от 1 до 3650 дней. Job `delete` стоит в той же очереди
+`ghcr-delivery`, что и `publish`, и пересчитывает план непосредственно перед
+удалением. Любая ошибка GitHub API или registry останавливает работу:
+отсутствие ответа не считается разрешением удалить. API GitHub не даёт
+атомарной транзакции между последним GET и DELETE. Общая очередь исключает
+пересечение с публикациями этого проекта; внешние процессы с правом записи
+в пакеты следует остановить на время удаления. Если ошибка возникла после
+первой DELETE, уже удалённые версии не откатываются автоматически; их ID
+остаются в журнале, восстановление выполняется через настройки пакета.
+Очистка обращается только к версиям GHCR и не подключается к PostgreSQL,
+Qdrant, Docker Compose или пользовательским данным приложения.
+
+`GITHUB_TOKEN` может удалять версии, если у репозитория роль Admin в пакете.
+Пакет, опубликованный этим репозиторием из Actions, получает её по умолчанию;
+для пакета, созданного иначе, роль выдаётся в `Package settings → Manage
+Actions access`. Удалённую версию можно восстановить в настройках пакета
+в течение 30 дней. Пробный запуск на чужом форке или ветке не выполняется.
+
+Локально план можно получить тем же скриптом с токеном `read:packages`
+(без `--delete` он ничего не меняет):
+
+```bash
+read -r -s -p "GitHub token (read:packages): " GITHUB_TOKEN && echo
+export GITHUB_TOKEN GITHUB_ACTOR=merkertg GITHUB_REPOSITORY=merkertg/ai-support-agent
+uv run --locked python scripts/ghcr_cleanup.py --days 30 --output reports/ghcr-cleanup-plan.json
+unset GITHUB_TOKEN
+```

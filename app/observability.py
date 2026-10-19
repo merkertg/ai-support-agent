@@ -1,8 +1,9 @@
 """Журнал API: одна JSON-строка на событие и id запроса для поиска по логам.
 
-В журнал попадают классы ошибок, коды и идентификаторы, но не тела запросов,
-query string, SQL, тексты ответов SDK и ключи: строка запроса может содержать
-license_key, а сообщение драйвера — параметры SQL и адрес базы.
+В журнал попадают классы ошибок, коды, идентификаторы и id сотрудника, но не
+тела запросов, заголовки (включая Authorization с токеном), query string, SQL,
+тексты ответов SDK и ключи: строка запроса может содержать license_key,
+а сообщение драйвера — параметры SQL и адрес базы.
 """
 
 import json
@@ -184,6 +185,8 @@ class RequestContextMiddleware:
             await response(scope, receive, send)
         finally:
             if not (scope["path"] in QUIET_PATHS and status < 400):
+                # Зависимость аутентификации кладёт id сотрудника в request.state.
+                state = scope.get("state")
                 log_event(
                     self.logger,
                     logging.WARNING if status >= 500 else logging.INFO,
@@ -192,5 +195,6 @@ class RequestContextMiddleware:
                     path=scope["path"],
                     status=status,
                     duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    user_id=state.get("user_id") if isinstance(state, dict) else None,
                 )
             request_id_var.reset(token)

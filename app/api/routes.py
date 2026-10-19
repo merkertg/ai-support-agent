@@ -2,9 +2,16 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.api.dependencies import ApiSession
+from app.api.security import (
+    AUTH_RESPONSES,
+    WRITE_RESPONSES,
+    admin_writer,
+    get_principal,
+    operator_writer,
+)
 from app.models import Customer, License, Product, Ticket, User
 from app.schemas.resources import (
     MAX_ID,
@@ -26,9 +33,12 @@ from app.schemas.resources import (
 from app.services import resources
 
 # Описываем ожидаемые ошибки в Swagger той же схемой, что возвращают handlers.
+# Любой маршрут требует токен сотрудника; создание — роль и лимит частоты.
 router = APIRouter(
     prefix="/api",
-    responses={
+    dependencies=[Depends(get_principal)],
+    responses=AUTH_RESPONSES
+    | {
         404: {
             "model": ErrorRead,
             "description": "Ресурс или указанная ссылка не найдены",
@@ -49,6 +59,8 @@ FilterId = Annotated[PositiveId | None, Query()]
     "/customers",
     response_model=CustomerRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES,
     tags=["Customers"],
 )
 def create_customer(payload: CustomerCreate, session: ApiSession) -> Customer:
@@ -74,6 +86,8 @@ def get_customer(resource_id: ResourceId, session: ApiSession) -> Customer:
     "/products",
     response_model=ProductRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES,
     tags=["Products"],
 )
 def create_product(payload: ProductCreate, session: ApiSession) -> Product:
@@ -99,6 +113,8 @@ def get_product(resource_id: ResourceId, session: ApiSession) -> Product:
     "/licenses",
     response_model=LicenseRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES,
     tags=["Licenses"],
 )
 def create_license(payload: LicenseCreate, session: ApiSession) -> License:
@@ -136,6 +152,8 @@ def get_license(resource_id: ResourceId, session: ApiSession) -> License:
     "/tickets",
     response_model=TicketRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES,
     tags=["Tickets"],
 )
 def create_ticket(payload: TicketCreate, session: ApiSession) -> Ticket:
@@ -173,10 +191,12 @@ def get_ticket(resource_id: ResourceId, session: ApiSession) -> Ticket:
     "/users",
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(admin_writer)],
+    responses=WRITE_RESPONSES,
     tags=["Users"],
 )
 def create_user(payload: UserCreate, session: ApiSession) -> User:
-    """Создать сотрудника поддержки, который будет рассматривать предложения."""
+    """Создать сотрудника с ролью; доступно только администратору."""
     return resources.create_user(session, payload)
 
 

@@ -8,6 +8,12 @@ from fastapi.responses import JSONResponse
 
 from app.api.dependencies import ApiSession
 from app.api.routes import ResourceId
+from app.api.security import (
+    AUTH_RESPONSES,
+    WRITE_RESPONSES,
+    get_principal,
+    operator_writer,
+)
 from app.llm.client import get_draft_client, llm_status
 from app.llm.errors import LLMError
 from app.observability import get_logger, log_event, upstream_fields
@@ -16,7 +22,12 @@ from app.schemas.resources import ErrorRead
 from app.services import drafts
 from app.services.drafts import ClientFactory
 
-router = APIRouter(prefix="/api", tags=["LLM"])
+router = APIRouter(
+    prefix="/api",
+    tags=["LLM"],
+    dependencies=[Depends(get_principal)],
+    responses=AUTH_RESPONSES,
+)
 
 
 def get_llm_client() -> ClientFactory:
@@ -55,7 +66,9 @@ def get_llm_status() -> LLMStatus:
 @router.post(
     "/tickets/{resource_id}/draft",
     response_model=DraftResponse,
-    responses={
+    dependencies=[Depends(operator_writer)],
+    responses=WRITE_RESPONSES
+    | {
         404: {"model": ErrorRead, "description": "Обращение или продукт не найдены"},
         413: {"model": ErrorRead, "description": "Контекст обращения слишком большой"},
         502: {"model": ErrorRead, "description": "Модель вернула непригодный ответ"},
