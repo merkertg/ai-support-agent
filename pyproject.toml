@@ -24,7 +24,7 @@ dependencies = [
 # Инструменты разработки: uv sync устанавливает группу dev по умолчанию.
 [dependency-groups]
 # Панель оператора и её HTTP-клиент; включаются через --group ui.
-ui = ["streamlit==1.65.0", "httpx"]
+ui = ["streamlit==1.66.1", "httpx"]
 dev = [
     {include-group = "ui"},  # Обычный uv sync готовит также тесты интерфейса.
     "httpx",   # HTTP-клиент, который также использует наш TestClient.
@@ -33,12 +33,38 @@ dev = [
     "ruff",    # Проверяет код и его форматирование.
 ]
 
-# Политика зависимостей: в lock попадают только выпуски старше двух недель.
+# Политика зависимостей: в lock попадают выпуски старше двух недель,
+# кроме явно обоснованных точных security-версий ниже.
 # uv не видит файлы PyPI новее этой даты. При обновлении зависимостей сдвинь
 # дату не ближе чем на 14 дней к текущему дню; CI проверяет это отдельно
 # скриптом scripts/check_dependency_age.py по датам публикации в uv.lock.
 [tool.uv]
-exclude-newer = "2026-10-04T00:00:00Z"
+exclude-newer = "2026-10-09T00:00:00Z"
+# Исправления опубликованы после общей границы; каждый допуск ограничен датой.
+exclude-newer-package = { certifi = "2026-10-21T00:00:00Z", pillow = "2026-10-17T00:00:00Z", streamlit = "2026-10-22T00:00:00Z" }
+# Не позволять последующему разрешению вернуть известные уязвимые версии.
+constraint-dependencies = [
+    "certifi>=2026.10.19",
+    "opentelemetry-api>=1.45.1",
+    "pillow>=13.0.0",
+]
+
+# check_dependency_age.py допускает только названную точную версию,
+# сохраняя проверку дат и минимальный возраст всех остальных пакетов.
+[tool.dependency-age.security-exceptions.certifi]
+version = "2026.10.19"
+reason = "Удаление скомпрометированного корня emSign; исправление PYSEC-2026-4320."
+advisory = "https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2"
+
+[tool.dependency-age.security-exceptions.pillow]
+version = "13.0.0"
+reason = "Исправление 35 находок pip-audit в Pillow 12.3.0."
+advisory = "https://github.com/python-pillow/Pillow/releases/tag/13.0.0"
+
+[tool.dependency-age.security-exceptions.streamlit]
+version = "1.66.1"
+reason = "Первый стабильный выпуск с поддержкой Pillow 13: прежние требуют pillow<13."
+advisory = "https://pypi.org/pypi/streamlit/1.66.1/json"
 
 # Pytest ищет тесты в tests/ и добавляет корень проекта в путь импортов.
 [tool.pytest.ini_options]

@@ -81,6 +81,64 @@ def test_project_itself_is_not_checked() -> None:
     assert age.check_lock(lock, NOW, MIN_AGE) == ([], 0)
 
 
+def test_security_exception_is_limited_to_exact_name_and_version() -> None:
+    """Допуск одного исправления не разрешает иной пакет или следующую версию."""
+    lock = {"package": [package("fixed", TOO_FRESH), package("other", TOO_FRESH)]}
+    errors, checked = age.check_lock(lock, NOW, MIN_AGE, {"fixed": "1.0.0"})
+    assert checked == 2
+    assert len(errors) == 1 and errors[0].startswith("other 1.0.0:")
+    lock["package"][0]["version"] = "1.0.1"
+    errors, _ = age.check_lock(lock, NOW, MIN_AGE, {"fixed": "1.0.0"})
+    assert len(errors) == 2
+
+
+@pytest.mark.parametrize("times", [(), ("2026-10-19T00:00:00Z",)])
+def test_security_exception_cannot_bypass_missing_or_future_metadata(times) -> None:
+    """Даже разрешённая версия обязана иметь реальную дату выпуска в прошлом."""
+    errors, _ = age.check_lock(
+        {"package": [package("fixed", *times)]}, NOW, MIN_AGE, {"fixed": "1.0.0"}
+    )
+    assert len(errors) == 1
+
+
+@pytest.mark.parametrize("missing", ["version", "reason", "advisory"])
+def test_security_exception_requires_version_reason_and_source(missing) -> None:
+    """Пустое поле исключения не даёт ослабить политику возраста пакетов."""
+    rule = {"version": "1.0.0", "reason": "Security fix", "advisory": "https://ghsa"}
+    rule[missing] = " "
+    project = {"tool": {"dependency-age": {"security-exceptions": {"fixed": rule}}}}
+    with pytest.raises(ValueError, match="version, reason, advisory"):
+        age.security_exceptions(project)
+
+
+@pytest.mark.parametrize(
+    ("bound", "exceptions", "expected"),
+    [
+        (False, {"fixed": "1.0.0"}, "фиксированную дату"),
+        ("2026-10-19T00:00:00Z", {"fixed": "1.0.0"}, "в будущем"),
+        ("2026-10-18T00:00:00Z", {}, "security-исключения"),
+        ("2026-10-18T00:00:00Z", {"fixed": "1.0.0"}, None),
+    ],
+)
+def test_package_cutoff_requires_dated_documented_security_exception(
+    bound, exceptions, expected
+) -> None:
+    """Запрещены безграничный допуск, будущая дата и необоснованное послабление."""
+    project = {
+        "tool": {
+            "uv": {
+                "exclude-newer": "2026-10-04T00:00:00Z",
+                "exclude-newer-package": {"fixed": bound},
+            }
+        }
+    }
+    errors = age.check_exclude_newer(project, NOW, MIN_AGE, exceptions)
+    if expected:
+        assert len(errors) == 1 and expected in errors[0]
+    else:
+        assert errors == []
+
+
 @pytest.mark.parametrize(
     ("pyproject", "expected"),
     [

@@ -77,7 +77,7 @@ tests/
   test_evaluations.py    # Metrics, labels and evaluation CLI exit codes
   test_observability.py  # Request ids, JSON log lines, no secrets or SQL in logs
   test_image_pins.py     # Every third-party image pinned by the same digest
-  test_dependency_age.py # Locked packages at least 14 days old on PyPI
+  test_dependency_age.py # Release age and exact documented security exceptions
   test_security_scenarios.py  # Agent scenarios and deliberate-regression checks
   test_demo_scenario.py  # Demo script against a fake HTTP API
   test_local_start.py    # Real Uvicorn and Streamlit start on the current OS

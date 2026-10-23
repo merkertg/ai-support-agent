@@ -2778,7 +2778,8 @@ def append_audit_pages(story, verification):
             'Исходный коммит: <font name="Mono">'
             f"{escape(verification['base_commit'])}</font>. "
             "Проверяются приложение, миграции, поиск, процесс "
-            "решения, образы API/UI и документация."
+            "решения и документация. Свежий аудит зависимостей выполнен; "
+            "контейнерные проверки ниже отмечены отдельно как история."
         ),
         Spacer(1, 9),
         evidence_table(
@@ -3453,6 +3454,12 @@ def append_audit_pages(story, verification):
             "и блокирует container/publish даже при зелёных assertions.",
             BODY_S,
         ),
+        p(
+            "23 октября: 1316 тестов, покрытие 86.06%; в сохранённом отчёте "
+            "smoke subprocess не измерен. Прежние 92.97% от 19 октября "
+            "относятся к другому прогону; настройка subprocess сохранена.",
+            BODY_S,
+        ),
         Spacer(1, 7),
         evidence_table(
             ["Отчёт", "Где смотреть"],
@@ -3515,7 +3522,16 @@ def append_audit_pages(story, verification):
             "<b>06:17 UTC / 11:17 Ташкент</b> или вручную только из main. "
             "prepare без write-токена сдвигает exclude-newer до полуночи UTC "
             "за 14 суток и выполняет uv lock --upgrade --no-build. Age check "
-            "повторно проверяет upload-time всех пакетов.",
+            "повторно проверяет upload-time всех пакетов. Только явно "
+            "обоснованная точная security-версия может пройти раньше 14 дней; "
+            "аудит уязвимостей остаётся обязательным.",
+            BODY_S,
+        ),
+        p(
+            "Исправление 23 октября: certifi 2026.10.19, "
+            "opentelemetry-api 1.45.1, Pillow 13.0.0, Streamlit 1.66.1. "
+            "В macOS/Linux runtime-аудитах 0 находок; age-checker проверен "
+            "18 тестами. Политика допускает только точные security-версии.",
             BODY_S,
         ),
         Spacer(1, 6),
@@ -3542,7 +3558,7 @@ def append_audit_pages(story, verification):
         p(
             "uv 0.12.23 опубликован 03.10.2026; совместимость актуального lock "
             "проверена. Оба builder используют его закреплённый digest. Точные "
-            "ограничения вроде streamlit==1.65.0 сохраняются. Docker digest, "
+            "ограничения вроде streamlit==1.66.1 сохраняются. Docker digest, "
             "Actions SHA и диапазоны пакетов пересматриваются отдельно. "
             "HTTP 403 при создании PR требует разрешения в настройках Actions; "
             "PAT для обхода скрипт не подставляет. Политика и разбор ошибок: "

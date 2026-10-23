@@ -1,89 +1,77 @@
 {
-  "checked_at": "2026-10-19",
-  "base_commit": "4962feb",
+  "checked_at": "2026-10-23",
+  "base_commit": "4cc7fe5 + security fixes",
   "tests": {
-    "total": 1306,
-    "unit": 1143,
+    "total": 1316,
+    "unit": 1153,
     "integration": 163,
     "smoke_cli": 112,
-    "skipped": 0
+    "skipped": 0,
+    "seconds": 118.01
   },
   "checks": [
     {
-      "name": "Код и комментарии",
-      "result": "Ruff без замечаний; 140 файлов Python, 1799 функций/классов с docstrings."
+      "name": "Код и инструкции",
+      "result": "Ruff/format PASS; 140 Python, 30 Markdown, 422 ссылок, 201 Bash, 14 JSON. 35 PowerShell не разобраны: нет pwsh."
     },
     {
-      "name": "Инструкции",
-      "result": "Текущая проверка: 28 Markdown, 390 ссылок, 196 Bash и JSON PASS. 33 PowerShell-блока локально не разобраны; parser есть в CI."
+      "name": "Полный Pytest",
+      "result": "1316 passed, 0 skipped: 1153 unit + 163 integration; 118.01 с. Отчёт pytest-security-fix.xml от 23 октября."
     },
     {
       "name": "Покрытие",
-      "result": "92.97% строк и ветвей вместе при пороге 85%; полный прогон 1306 тестов, CLI subprocess учтены."
+      "result": "86.06% вместе, строки 87.99%, ветви 78.77%; порог 85% выполнен. Smoke subprocess в этом отчёте не измерен."
     },
     {
-      "name": "CI и платформы",
-      "result": "1a495e9: 8 зелёных заданий со слов пользователя. Три workflow: actionlint PASS; CI нового backup-коммита 4962feb ещё не подтверждён."
+      "name": "Аудит runtime",
+      "result": "Новые JSON: macOS 86 пакетов, Linux 87; 0 известных уязвимостей, без ignore-vuln."
     },
     {
-      "name": "Токены и роли",
-      "result": "SHA-256 токенов; operator/reviewer/admin; 401/403/429; автор решения из токена, конкурентные PG-проверки."
+      "name": "Lock и возраст",
+      "result": "99 пакетов lock; 98 внешних проверены. Для certifi, Pillow и Streamlit точные security-допуски; 18 тестов age-check PASS."
     },
     {
-      "name": "Зависимости",
-      "result": "Ранее: Linux audit: 88 пакетов API/UI, 0 известных уязвимостей и пропусков. 99 пакетов lock старше 14 дней."
+      "name": "Исправленные версии",
+      "result": "certifi 2026.10.19; opentelemetry-api 1.45.1; Pillow 13.0.0; Streamlit 1.66.1."
     },
     {
-      "name": "Оценки",
-      "result": "Recall@5 0.9808; MRR@5/no-hit 1.00; scope 0; 12/12 сценариев агента; реальная модель не вызывалась."
+      "name": "Оценки mock",
+      "result": "Новый прогон: 32 вопроса, Recall@5 0.9808, MRR@5/no-hit 1.00, scope 0; агент 12/12. Реальной модели не было."
     },
     {
-      "name": "Образы и GHCR",
-      "result": "Ранее: 4 образа amd64/arm64, Trivy и SBOM PASS; очистка GHCR dry-run, 230 тестов; публичная подпись выключена."
+      "name": "CI и публикация",
+      "result": "Новый удалённый CI, GHCR и сборка образов после обновления пока не подтверждены."
     },
     {
-      "name": "Контейнерный CI",
-      "result": "Ранее: Миграции, токены, review/resume, тома, UI AppTest, demo approve/reject и повтор, журнал без секретов: PASS."
+      "name": "История: образы",
+      "result": "19 октября: контейнерные проверки, Trivy/SBOM и четыре образа. В новом прогоне не повторялись."
     },
     {
-      "name": "Локальный запуск",
-      "result": "Ранее: Настоящие Uvicorn/Streamlit на macOS: PASS. Нативные Windows/Linux проверяет матрица GitHub."
-    },
-    {
-      "name": "Резервные копии",
-      "result": "61 unit PASS повторно. Локальный restore ранее прошёл; найдены ограничения проверки изменений и отказа между заменой двух хранилищ."
-    },
-    {
-      "name": "Персональные данные",
-      "result": "Обезличивание и срок хранения: 44 теста; поиск по всем таблицам и checkpoint чист; шаг container локально PASS."
+      "name": "История: backup/privacy",
+      "result": "19 октября: backup restore и обезличивание PASS; ограничения согласованности backup остаются. Новый живой smoke не повторялся."
     }
   ],
   "remote_ci": {
-    "status": "passed",
-    "commit": "1a495e9dfd591540c589c5ed309e52b56786abd8",
-    "previous_user_confirmed_commit": "571538c9852133a8f5288565a86cca9393cce1fb",
-    "detail": "Пользователь подтвердил 8 зелёных заданий для 1a495e9. Во время проверки backup отправлен в main: 4962feb; его CI пока не подтверждён. Повторно прошёл 61 unit-тест. Есть замечания к согласованности и восстановлению при сбое. Подпись выключена.",
-    "previous_failed_commit": "6fbe9a6763f3023b43f2615f2a09782454e18ccd",
-    "confirmed_by": "user",
-    "confirmed_at": "2026-10-19",
+    "status": "not_verified",
+    "detail": "Исправление безопасности поверх 4cc7fe5 проверено локально. Новый GitHub Actions и публикация GHCR не подтверждены; старое подтверждение пользователя для 1a495e9 относится к 19 октября.",
     "pending_worktree_changes": true,
-    "latest_commit": "4962feb3126f9f0c998758984d44c5cab2ceea00",
+    "latest_commit": "4cc7fe5",
     "latest_commit_status": "not_verified"
   },
   "changes": [
-    "Доступ: токены сотрудников, роли operator/reviewer/admin и лимит изменений; автор решения — из токена, FOR SHARE против понижения роли.",
-    "Образы: amd64/arm64 и SBOM; очистка GHCR проверяет связи и версии; публичная подпись выключена по выбору пользователя.",
-    "Исправлен дедлайн smoke на Windows; форма обращения выбирает клиента и продукт по имени.",
-    "Резервные копии: backup.py create/verify/restore с манифестом и проверкой восстановления в чистые тома в CI.",
-    "Персональные данные: администратор обезличивает клиента по email (UI, API, CLI); срок хранения закрытых обращений; поиск маркера по всем таблицам в CI."
+    "23 октября исправлены certifi, opentelemetry-api, Pillow и Streamlit; runtime-аудит macOS/Linux — 0 находок, 1316 тестов PASS.",
+    "Проверка возраста допускает только точные security-версии с причиной и источником; строгий аудит сохранён.",
+    "Ранее реализованы токены, роли, лимиты, обезличивание и срок хранения; новые живые контейнерные проверки не повторялись.",
+    "Ранее реализованы API/UI для amd64/arm64, SBOM и очистка GHCR; публичная подпись выключена.",
+    "Ранее исправлен запуск Windows, добавлены выбор по имени, backup.py и восстановление в чистые тома в CI."
   ],
   "remaining": [
-    "Завершить backup: согласованность копии и возврат при сбое между Qdrant/PostgreSQL; затем проверить отдельный CI нового SHA.",
-    "SSO, общий лимит нескольких worker и внешний TLS остаются отдельным расширением; локальный вход администратора уже подготовлен.",
-    "Публичная подпись выключена; GHCR_PUBLIC_SIGNING=true включает её и раскрытие metadata в Rekor.",
-    "Mock остаётся по выбору пользователя. Реальная модель, внешняя доставка и серверный deploy не проверялись и не настроены.",
-    "Расписание копий и шифрованное внешнее хранилище не настроены; шаг восстановления в CI ждёт первого удалённого запуска.",
-    "Обезличивание не меняет старые резервные копии и журналы Docker: после восстановления копии повторить erase; срок хранения выбирает владелец данных."
+    "Подтвердить CI и новые образы итогового SHA; новый живой Docker smoke локально не повторяли.",
+    "Завершить согласованность backup и возврат при сбое между заменами Qdrant/PostgreSQL.",
+    "SSO, общий лимит нескольких worker и внешний TLS остаются расширением; локальный вход администратора готов.",
+    "Публичная подпись выключена; GHCR_PUBLIC_SIGNING=true раскрывает metadata в Rekor.",
+    "Mock сохранён. Реальная модель, внешняя доставка, серверный deploy, расписание и шифрованное хранилище копий не проверены.",
+    "Обезличивание не меняет старые копии и журналы Docker; после restore повторить erase, срок хранения выбирает владелец."
   ],
   "evaluations": {
     "questions": 32,
@@ -95,15 +83,16 @@
     "agent_total": 12
   },
   "coverage": {
-    "combined_percent": 92.81,
-    "line_percent": 94.35,
-    "branch_percent": 86.89,
+    "combined_percent": 86.06,
+    "line_percent": 87.99,
+    "branch_percent": 78.77,
     "minimum_combined_percent": 85,
-    "covered_lines": 5596,
-    "statements": 5931,
-    "covered_branches": 1345,
-    "branches": 1548,
-    "subprocess": true
+    "covered_lines": 5524,
+    "statements": 6278,
+    "covered_branches": 1306,
+    "branches": 1658,
+    "subprocess": false,
+    "detail": "Patch=subprocess remains configured; the saved security run did not measure smoke subprocesses (scripts/smoke_test.py 0%). Historical 92.97% is a different run."
   },
   "bootstrap": {
     "admin_created": true,
@@ -189,5 +178,58 @@
     "coverage_service_percent": 95.29,
     "container_step_local": "passed",
     "remote_ci": "not_run"
+  },
+  "previous_privacy_run": {
+    "checked_at": "2026-10-19",
+    "base_commit": "4962feb",
+    "tests": {
+      "total": 1306,
+      "unit": 1143,
+      "integration": 163,
+      "smoke_cli": 112,
+      "skipped": 0
+    },
+    "coverage_percent": 92.97,
+    "scope": "Privacy checks from 19 October; the subprocess measurement differs from the security rerun."
+  },
+  "previous_remote_ci": {
+    "status": "passed",
+    "commit": "1a495e9dfd591540c589c5ed309e52b56786abd8",
+    "previous_user_confirmed_commit": "571538c9852133a8f5288565a86cca9393cce1fb",
+    "detail": "Пользователь подтвердил 8 зелёных заданий для 1a495e9. Во время проверки backup отправлен в main: 4962feb; его CI пока не подтверждён. Повторно прошёл 61 unit-тест. Есть замечания к согласованности и восстановлению при сбое. Подпись выключена.",
+    "previous_failed_commit": "6fbe9a6763f3023b43f2615f2a09782454e18ccd",
+    "confirmed_by": "user",
+    "confirmed_at": "2026-10-19",
+    "pending_worktree_changes": true,
+    "latest_commit": "4962feb3126f9f0c998758984d44c5cab2ceea00",
+    "latest_commit_status": "not_verified"
+  },
+  "dependency_security": {
+    "checked_at": "2026-10-23",
+    "macos_packages": 86,
+    "linux_packages": 87,
+    "known_vulnerabilities": 0,
+    "lock_packages": 99,
+    "external_packages_age_checked": 98,
+    "age_checker_tests": 18,
+    "versions": {
+      "certifi": "2026.10.19",
+      "opentelemetry-api": "1.45.1",
+      "pillow": "13.0.0",
+      "streamlit": "1.66.1"
+    },
+    "reports": [
+      "reports/pip-audit-after-security-fix.json",
+      "reports/pip-audit-linux-after-security-fix.json",
+      "reports/pytest-security-fix.xml",
+      "reports/coverage-security-fix.json",
+      "reports/evaluations-security-fix.json"
+    ]
+  },
+  "pdf": {
+    "pages": 25,
+    "checked_at": "2026-10-23",
+    "sha256": "9999a5821096723969dec11207224b340f0bf0e50821d8c9a399ebe79f542d28",
+    "visual_review": "Все 25 страниц отрисованы и просмотрены на контактных листах; страницы 16, 23, 24 и 25 проверены крупно. Обрезок и наложений не найдено."
   }
 }

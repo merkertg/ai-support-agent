@@ -1,7 +1,8 @@
 """Проверить, что каждая зависимость из uv.lock опубликована не менее N дней назад.
 
-Политика проекта: новая версия пакета попадает в lock только после двух недель
-на PyPI. uv записывает в lock время загрузки каждого файла; скрипт берёт самое
+Политика проекта: новая версия пакета попадает в lock после двух недель
+на PyPI либо по обоснованному исключению для точной security-версии.
+uv записывает в lock время загрузки каждого файла; скрипт берёт самое
 раннее время версии и сравнивает его с текущим моментом. Дополнительно
 проверяется дата `[tool.uv] exclude-newer` в pyproject.toml: по ней uv отбирает
 версии при `uv lock`. Используется только стандартная библиотека, без сети.
@@ -34,7 +35,34 @@ def release_time(package: dict) -> datetime | None:
     return min(times) if times else None
 
 
-def check_lock(lock: dict, now: datetime, min_age: timedelta) -> tuple[list[str], int]:
+def security_exceptions(pyproject: dict) -> dict[str, str]:
+    """Прочитать точные security-версии; пустое обоснование запрещает допуск."""
+    rules = (
+        pyproject.get("tool", {})
+        .get("dependency-age", {})
+        .get("security-exceptions", {})
+    )
+    if not isinstance(rules, dict):
+        raise ValueError("security-exceptions должен быть таблицей точных версий")
+    exceptions = {}
+    for name, rule in rules.items():
+        if not isinstance(rule, dict) or any(
+            not isinstance(rule.get(key), str) or not rule[key].strip()
+            for key in ("version", "reason", "advisory")
+        ):
+            raise ValueError(
+                f"{name}: security-исключению нужны version, reason, advisory"
+            )
+        exceptions[name] = rule["version"]
+    return exceptions
+
+
+def check_lock(
+    lock: dict,
+    now: datetime,
+    min_age: timedelta,
+    exceptions: dict[str, str] | None = None,
+) -> tuple[list[str], int]:
     """Найти слишком свежие пакеты и пакеты реестра без даты публикации."""
     errors = []
     checked = 0
@@ -49,14 +77,18 @@ def check_lock(lock: dict, now: datetime, min_age: timedelta) -> tuple[list[str]
             errors.append(f"{name}: в uv.lock нет upload-time, возраст не проверить")
             continue
         checked += 1
-        if released > cutoff:
+        allowed = (exceptions or {}).get(package["name"]) == package["version"]
+        if released > cutoff and (not allowed or released > now):
             age = (now - released).days
             errors.append(f"{name}: опубликован {released.date()}, возраст {age} дн.")
     return errors, checked
 
 
 def check_exclude_newer(
-    pyproject: dict, now: datetime, min_age: timedelta
+    pyproject: dict,
+    now: datetime,
+    min_age: timedelta,
+    exceptions: dict[str, str] | None = None,
 ) -> list[str]:
     """Потребовать границу uv не ближе минимального возраста к текущей дате."""
     value = pyproject.get("tool", {}).get("uv", {}).get("exclude-newer")
@@ -67,7 +99,16 @@ def check_exclude_newer(
             f"pyproject.toml: exclude-newer {value} ближе "
             f"{min_age.days} дн. к текущей дате"
         ]
-    return []
+    errors = []
+    bounds = pyproject.get("tool", {}).get("uv", {}).get("exclude-newer-package", {})
+    for name, bound in bounds.items():
+        if not isinstance(bound, str):
+            errors.append(f"{name}: exclude-newer-package требует фиксированную дату")
+        elif parse_time(bound) > now:
+            errors.append(f"{name}: exclude-newer-package не может быть в будущем")
+        elif parse_time(bound) > now - min_age and name not in (exceptions or {}):
+            errors.append(f"{name}: свежая граница требует точного security-исключения")
+    return errors
 
 
 def use_utf8_output() -> None:
@@ -100,8 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock = tomllib.loads(arguments.lock.read_text(encoding="utf-8"))
         pyproject = tomllib.loads(arguments.pyproject.read_text(encoding="utf-8"))
-        errors, checked = check_lock(lock, now, min_age)
-        errors += check_exclude_newer(pyproject, now, min_age)
+        exceptions = security_exceptions(pyproject)
+        errors, checked = check_lock(lock, now, min_age, exceptions)
+        errors += check_exclude_newer(pyproject, now, min_age, exceptions)
     except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as error:
         print(f"Dependency age: invalid input: {error}", file=sys.stderr)
         return 2
@@ -114,9 +156,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
     print(
-        f"Dependency age: OK, {checked} пакетов опубликованы не позже "
+        f"Dependency age: OK, {checked} пакетов проверены; граница "
         f"{(now - min_age).date()} ({min_age.days} дн. до {now.date()})."
     )
+    if exceptions:
+        print(
+            "Точные security-исключения: "
+            + ", ".join(f"{name}=={version}" for name, version in exceptions.items())
+        )
     return 0
 
 
